@@ -274,7 +274,26 @@ func (s *Server) viewBootstrap(c *gin.Context) {
 	sources, _ := s.sourceSvc.List()
 	nodes, _ := s.nodes.List()
 	subs, _ := s.subs.List(s.publicBase(c))
-	c.JSON(200, gin.H{"ok": true, "sources": sources, "nodes": nodes, "subscriptions": subs})
+	base := strings.TrimRight(s.publicBase(c), "/")
+	subEnriched := make([]gin.H, len(subs))
+	for i, sub := range subs {
+		subEnriched[i] = gin.H{
+			"id":               sub.ID,
+			"name":             sub.Name,
+			"token":            sub.Token,
+			"source_ids":       sub.SourceIDs,
+			"node_ids":         sub.NodeIDs,
+			"enabled":          sub.Enabled,
+			"access_count":     sub.AccessCount,
+			"last_accessed_at": sub.LastAccessedAt,
+			"created_at":       sub.CreatedAt,
+			"updated_at":       sub.UpdatedAt,
+			"url":              "/sub/" + sub.Token,
+			"full_url":         base + "/sub/" + sub.Token,
+			"clash_url":        base + "/sub/" + sub.Token + "/clash",
+		}
+	}
+	c.JSON(200, gin.H{"ok": true, "sources": sources, "nodes": nodes, "subscriptions": subEnriched})
 }
 func (s *Server) suiInbounds(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
@@ -371,7 +390,30 @@ func (s *Server) deleteLocalNode(c *gin.Context) {
 }
 func (s *Server) listSubscriptions(c *gin.Context) {
 	v, err := s.subs.List(s.publicBase(c))
-	jsonResultKey(c, "subscriptions", v, err)
+	if err != nil {
+		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	base := strings.TrimRight(s.publicBase(c), "/")
+	out := make([]gin.H, len(v))
+	for i, sub := range v {
+		out[i] = gin.H{
+			"id":               sub.ID,
+			"name":             sub.Name,
+			"token":            sub.Token,
+			"source_ids":       sub.SourceIDs,
+			"node_ids":         sub.NodeIDs,
+			"enabled":          sub.Enabled,
+			"access_count":     sub.AccessCount,
+			"last_accessed_at": sub.LastAccessedAt,
+			"created_at":       sub.CreatedAt,
+			"updated_at":       sub.UpdatedAt,
+			"url":              "/sub/" + sub.Token,
+			"full_url":         base + "/sub/" + sub.Token,
+			"clash_url":        base + "/sub/" + sub.Token + "/clash",
+		}
+	}
+	c.JSON(200, gin.H{"ok": true, "subscriptions": out})
 }
 func (s *Server) createSubscription(c *gin.Context) {
 	var req struct {

@@ -23,6 +23,29 @@ func ParseRawLink(raw string) ParsedLink {
 	if i := strings.Index(raw, "://"); i > 0 {
 		p.Protocol = strings.ToLower(raw[:i])
 	}
+	// ss:// links: whole content is Base64(method:password@host:port)#name
+	if p.Protocol == "ss" {
+		after := raw[strings.Index(raw, "://")+3:]
+		if idx := strings.Index(after, "#"); idx >= 0 {
+			p.Name, _ = url.QueryUnescape(after[idx+1:])
+			after = after[:idx]
+		}
+		decoded, err := base64.RawStdEncoding.DecodeString(after)
+		if err != nil {
+			decoded, err = base64.StdEncoding.DecodeString(after)
+		}
+		if err == nil {
+			plain := string(decoded)
+			if idx := strings.LastIndex(plain, "@"); idx >= 0 {
+				p.Host = plain[idx+1:]
+				if colon := strings.LastIndex(p.Host, ":"); colon >= 0 {
+					p.Port, _ = strconv.Atoi(p.Host[colon+1:])
+					p.Host = p.Host[:colon]
+				}
+			}
+		}
+		return p
+	}
 	if u, err := url.Parse(raw); err == nil {
 		if u.Fragment != "" {
 			if n, e := url.QueryUnescape(u.Fragment); e == nil && strings.TrimSpace(n) != "" {

@@ -233,6 +233,10 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, raw := range links {
+		// Skip non-link garbage (HTML/JS/etc)
+		if !strings.Contains(raw, "://") || len(raw) > 2000 {
+			continue
+		}
 		p := subconv.ParseRawLink(raw)
 		h := subconv.StableHash(raw)
 		var exists int64
