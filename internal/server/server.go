@@ -22,7 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "0.5.0-dev"
+const Version = "0.6.0-dev"
 
 type Server struct {
 	cfg       config.Config
@@ -295,14 +295,14 @@ func (s *Server) suiInboundDelete(c *gin.Context) {
 	jsonOK(c, err)
 }
 func (s *Server) kernelInstall(c *gin.Context) {
-	v, err := s.conn.InstallMihomo()
+	v, err := s.conn.InstallKernel()
 	if err != nil {
 		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
 	c.JSON(200, gin.H{"ok": true, "version": v})
 }
-func (s *Server) kernelUninstall(c *gin.Context) { jsonOK(c, s.conn.UninstallMihomo()) }
+func (s *Server) kernelUninstall(c *gin.Context) { jsonOK(c, s.conn.UninstallKernel()) }
 func (s *Server) bridgeMeta(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true, "enabled": false, "message": "bridge E2EE push is pending"})
 }

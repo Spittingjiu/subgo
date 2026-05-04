@@ -23,10 +23,10 @@
    - 多订阅 token
    - 按 source/node 组合输出
    - plain links
-   - Clash/Mihomo YAML
+   - Clash/sing-box YAML
    - 订阅访问日志
 5. 连通性检测
-   - mihomo 内核安装/卸载/状态
+   - sing-box 内核安装/卸载/状态
    - 节点连通性批量检测
    - 自动检测与不可用节点裁剪
 6. 上游面板能力
@@ -50,11 +50,11 @@
 - `internal/services/source`：源 CRUD 与同步编排
 - `internal/services/node`：节点解析、入库、显示编号、状态
 - `internal/services/subscription`：订阅 CRUD 与输出
-- `internal/services/connectivity`：mihomo 安装与检测
+- `internal/services/connectivity`：sing-box 安装与检测
 - `internal/adapters/sui`：SUI API client
 - `internal/adapters/sbui`：SBUI/S-Matrix adapter
 - `internal/adapters/rawsub`：raw subscription adapter
-- `internal/subconv`：链接解析、Clash/Mihomo YAML 生成
+- `internal/subconv`：链接解析、Clash/sing-box YAML 生成
 - `web`：后续前端资源
 
 ## 迁移策略
@@ -73,7 +73,7 @@
 ### Phase 2：订阅核心链路
 - raw link 解析
 - plain 输出
-- Clash/Mihomo YAML 输出
+- Clash/sing-box YAML 输出
 - subscription token 与访问日志
 
 ### Phase 3：源同步
@@ -86,7 +86,7 @@
 - 旧前端功能等价迁移或新前端
 
 ### Phase 5：连通性检测与上游管理
-- mihomo 管理
+- sing-box 管理
 - 节点检测
 - SUI/SBUI inbound 管理
 - panel proxy

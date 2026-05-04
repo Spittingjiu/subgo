@@ -150,7 +150,7 @@
         <h3>节点列表（按源查看）</h3>
         <div class="row" style="margin-top:6px">
           <select id="nodeSourceSelect" style="min-width:150px;max-width:190px" onchange="setNodeSource(this.value)"></select>
-          <span id="kernelBadge" class="pill">测速内核：检测中…</span>
+          <span id="kernelBadge" class="pill">sing-box 内核：检测中…</span>
           <button id="kernelToggleBtn" onclick="toggleKernelInstall()">加载中…</button>
           <input id="localNodeLink" placeholder="粘贴节点链接" style="min-width:320px;max-width:640px;flex:1 1 520px"/>
           <input id="localNodeName" placeholder="备注(可选)" style="min-width:86px;max-width:120px;flex:0 0 110px"/>
@@ -565,11 +565,11 @@ async function refreshKernelStatus(){
     const j=await api('/api/kernel/status');
     kernelInstalled=!!j.installed;
     const b=q('#kernelBadge'), btn=q('#kernelToggleBtn');
-    if(b) b.textContent=`测速内核：${kernelInstalled?'已安装':'未安装'}`;
-    if(btn) btn.textContent=kernelInstalled?'卸载内核':'安装内核';
+    if(b) b.textContent=`sing-box 内核：${kernelInstalled?'已安装':'未安装'}`;
+    if(btn) btn.textContent=kernelInstalled?'卸载 sing-box':'安装 sing-box';
   }catch(e){
     const b=q('#kernelBadge'), btn=q('#kernelToggleBtn');
-    if(b) b.textContent='测速内核：状态异常';
+    if(b) b.textContent='sing-box 内核：状态异常';
     if(btn) btn.textContent='重试检测';
   }
 }
@@ -578,10 +578,10 @@ async function toggleKernelInstall(){
     const btn=q('#kernelToggleBtn'); if(btn) btn.disabled=true;
     if(kernelInstalled){
       await api('/api/kernel/uninstall',{method:'POST',body:'{}'});
-      toast('测速内核已卸载','ok');
+      toast('sing-box sing-box 已卸载','ok');
     }else{
       await api('/api/kernel/install',{method:'POST',body:'{}'});
-      toast('测速内核已安装','ok');
+      toast('sing-box sing-box 已安装','ok');
     }
   }catch(e){
     const nm=q('#nodeMsg'); if(nm){nm.className='err'; nm.textContent=e.message;}

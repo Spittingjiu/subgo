@@ -1,6 +1,7 @@
 package connectivity
 
 import (
+	"archive/tar"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -22,8 +23,8 @@ import (
 	"github.com/Spittingjiu/subgo/internal/subconv"
 )
 
-const MihomoBin = "/usr/local/bin/mihomo"
-const MihomoTmp = "/opt/subgo/mihomo-install"
+const KernelBin = "/usr/local/bin/sing-box"
+const KernelTmp = "/opt/subgo/singbox-install"
 
 type Service struct{ db *sql.DB }
 type Result struct {
@@ -39,6 +40,7 @@ type KernelStatus struct {
 	Version   string `json:"version"`
 	Path      string `json:"path"`
 	Mode      string `json:"mode"`
+	Kernel    string `json:"kernel"`
 }
 
 func New(db *sql.DB) *Service { return &Service{db: db} }
@@ -46,20 +48,28 @@ func (s *Service) EnsureSchema() {
 	s.db.Exec(`CREATE TABLE IF NOT EXISTS node_connectivity (node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, status TEXT NOT NULL, latency_ms INTEGER, last_error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)`)
 }
 func (s *Service) KernelStatus() KernelStatus {
-	st := KernelStatus{OK: true, Path: MihomoBin, Mode: "tcp-check"}
-	if _, err := os.Stat(MihomoBin); err == nil {
+	st := KernelStatus{OK: true, Path: KernelBin, Mode: "tcp-check", Kernel: "sing-box"}
+	if _, err := os.Stat(KernelBin); err == nil {
 		st.Installed = true
-		out, _ := exec.Command(MihomoBin, "-v").CombinedOutput()
+		out, _ := exec.Command(KernelBin, "version").CombinedOutput()
 		st.Version = strings.TrimSpace(string(out))
-		st.Mode = "mihomo+tcp"
+		st.Mode = "sing-box+tcp"
 	}
 	return st
 }
-func (s *Service) InstallMihomo() (string, error) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		return "", errors.New("auto install currently supports linux/amd64")
+func (s *Service) InstallKernel() (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", errors.New("auto install currently supports linux")
 	}
-	req, _ := http.NewRequest("GET", "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest", nil)
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "amd64"
+	} else if arch == "arm64" {
+		arch = "arm64"
+	} else {
+		return "", fmt.Errorf("unsupported arch %s", runtime.GOARCH)
+	}
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/SagerNet/sing-box/releases/latest", nil)
 	req.Header.Set("User-Agent", "subgo")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -78,27 +88,19 @@ func (s *Service) InstallMihomo() (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
 		return "", err
 	}
-	var url string
+	var assetURL string
+	needle := "linux-" + arch
 	for _, a := range rel.Assets {
 		n := strings.ToLower(a.Name)
-		if strings.Contains(n, "linux-amd64-compatible") && strings.HasSuffix(n, ".gz") {
-			url = a.URL
+		if strings.Contains(n, "sing-box") && strings.Contains(n, needle) && strings.HasSuffix(n, ".tar.gz") && !strings.Contains(n, "android") {
+			assetURL = a.URL
 			break
 		}
 	}
-	if url == "" {
-		for _, a := range rel.Assets {
-			n := strings.ToLower(a.Name)
-			if strings.Contains(n, "linux-amd64") && strings.HasSuffix(n, ".gz") {
-				url = a.URL
-				break
-			}
-		}
+	if assetURL == "" {
+		return "", fmt.Errorf("no sing-box %s tar.gz asset found", needle)
 	}
-	if url == "" {
-		return "", errors.New("no linux-amd64 mihomo asset found")
-	}
-	r, err := http.Get(url)
+	r, err := http.Get(assetURL)
 	if err != nil {
 		return "", err
 	}
@@ -111,32 +113,51 @@ func (s *Service) InstallMihomo() (string, error) {
 		return "", err
 	}
 	defer gz.Close()
-	if err := os.MkdirAll(MihomoTmp, 0755); err != nil {
+	tr := tar.NewReader(gz)
+	if err := os.MkdirAll(KernelTmp, 0755); err != nil {
 		return "", err
 	}
-	tmp := filepath.Join(MihomoTmp, "mihomo.new")
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(f, gz); err != nil {
+	tmp := filepath.Join(KernelTmp, "sing-box.new")
+	found := false
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if filepath.Base(h.Name) != "sing-box" {
+			continue
+		}
+		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.Copy(f, tr); err != nil {
+			f.Close()
+			return "", err
+		}
 		f.Close()
+		found = true
+		break
+	}
+	if !found {
+		return "", errors.New("sing-box binary not found in archive")
+	}
+	if err := os.Rename(tmp, KernelBin); err != nil {
 		return "", err
 	}
-	f.Close()
-	if err := os.Rename(tmp, MihomoBin); err != nil {
-		return "", err
-	}
-	_ = os.Chmod(MihomoBin, 0755)
-	out, err := exec.Command(MihomoBin, "-v").CombinedOutput()
+	_ = os.Chmod(KernelBin, 0755)
+	out, err := exec.Command(KernelBin, "version").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("verify failed: %s", strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
-func (s *Service) UninstallMihomo() error {
-	if _, err := os.Stat(MihomoBin); err == nil {
-		return os.Remove(MihomoBin)
+func (s *Service) UninstallKernel() error {
+	if _, err := os.Stat(KernelBin); err == nil {
+		return os.Remove(KernelBin)
 	}
 	return nil
 }

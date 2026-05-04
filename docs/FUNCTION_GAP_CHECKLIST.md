@@ -81,18 +81,18 @@
 | 修改订阅 | `PUT /api/subscriptions/:id` | ✅ | 支持重命名、节点范围调整、启停 |
 | 删除订阅 | `DELETE /api/subscriptions/:id` | ✅ | 删除 token |
 | plain 输出 | `/sub/:token`, `/api/sub/:token/plain` | ✅ | 初版 plain 输出可用，streaming writer 后续优化 |
-| Clash/Mihomo 输出 | `/sub/:token/clash` | 🟡 | 已支持 vless/hy2/ss/trojan 基础 YAML |
+| Clash/sing-box 输出 | `/sub/:token/clash` | 🟡 | 已支持 vless/hy2/ss/trojan 基础 YAML |
 | 订阅访问日志 | `GET /api/admin/subscription-logs` | ✅ | 初版同步写入，异步后续优化 |
 | 自动裁剪不可用节点 | 字段已存在 | ⬜ | 和连通性检测联动 |
 | 模板支持 | clash template URL | ⬜ | 可后置，先保证内置模板 |
 
-## 6. 连通性检测与 mihomo 内核
+## 6. 连通性检测与 sing-box 内核
 
 | 功能 | 旧 Sub endpoint | subgo 状态 | Go 优势落地 |
 |---|---|---:|---|
-| 内核状态 | `GET /api/kernel/status` | 🟡 | 初版返回 TCP 检测模式，mihomo 安装后续补 |
-| 安装 mihomo | `POST /api/kernel/install` | ✅ | GitHub latest linux-amd64 下载、gzip 解压、原子替换、版本校验 |
-| 卸载 mihomo | `POST /api/kernel/uninstall` | ✅ | 仅删除 `/usr/local/bin/mihomo` |
+| 内核状态 | `GET /api/kernel/status` | 🟡 | 初版返回 TCP 检测模式，sing-box 安装后续补 |
+| 安装 sing-box | `POST /api/kernel/install` | ✅ | GitHub latest linux-amd64 下载、gzip 解压、原子替换、版本校验 |
+| 卸载 sing-box | `POST /api/kernel/uninstall` | ✅ | 仅删除 `/usr/local/bin/sing-box` |
 | 单批检测 | `POST /api/nodes/connectivity/check` | ✅ | TCP context timeout + worker pool |
 | 检测结果 | `GET /api/nodes/connectivity` | ✅ | latency/status/error |
 | 手动全量检测 | `POST /api/admin/connectivity/run-now` | ✅ | 初版同步执行 |
@@ -138,7 +138,7 @@
 2. ⬜ 登录/session/admin settings
 3. ✅ local node + plain subscription 输出（最快形成闭环）
 4. ✅ raw/cf_sub source 导入与同步
-5. 🟡 subscription CRUD + Clash/Mihomo 输出
+5. 🟡 subscription CRUD + Clash/sing-box 输出
 6. ⬜ SBUI source adapter
 7. ⬜ SUI source adapter
 8. ✅ 连通性检测 worker pool
