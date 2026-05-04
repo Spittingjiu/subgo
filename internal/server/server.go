@@ -17,7 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "0.2.0-dev"
+const Version = "0.3.0-dev"
 
 type Server struct {
 	cfg       config.Config
@@ -81,6 +81,19 @@ func (s *Server) routes() {
 	api.POST("/nodes/connectivity/check", s.connectivityCheck)
 	api.POST("/admin/connectivity/run-now", s.connectivityCheck)
 	api.GET("/admin/subscription-logs", s.subscriptionLogs)
+	api.GET("/view/home", s.viewHome)
+	api.GET("/view/nodes", s.listNodes)
+	api.GET("/view/bootstrap", s.viewBootstrap)
+	api.GET("/view/modal-nodes", s.listNodes)
+	api.GET("/view/subscriptions", s.listSubscriptions)
+	api.GET("/sui/:sourceId/inbounds", s.suiInbounds)
+	api.POST("/sui/:sourceId/reality-quick", s.suiRealityQuick)
+	api.PUT("/sui/:sourceId/inbounds/:inboundId/rename", s.suiInboundRename)
+	api.DELETE("/sui/:sourceId/inbounds/:inboundId", s.suiInboundDelete)
+	api.POST("/kernel/install", s.kernelInstall)
+	api.POST("/kernel/uninstall", s.kernelUninstall)
+	api.GET("/bridge/e2ee-meta", s.bridgeMeta)
+	api.POST("/bridge/push-source", s.bridgePushSource)
 	api.GET("/nodes", s.listNodes)
 	api.POST("/local-nodes", s.createLocalNode)
 	api.POST("/nodes/:id/toggle", s.toggleNode)
@@ -194,6 +207,44 @@ func (s *Server) subscriptionLogs(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"ok": true, "logs": out})
 }
+
+func (s *Server) viewHome(c *gin.Context) {
+	sources, _ := s.sourceSvc.List()
+	nodes, _ := s.nodes.List()
+	subs, _ := s.subs.List(s.publicBase(c))
+	c.JSON(200, gin.H{"ok": true, "stats": gin.H{"sources": len(sources), "nodes": len(nodes), "subscriptions": len(subs)}})
+}
+func (s *Server) viewBootstrap(c *gin.Context) {
+	sources, _ := s.sourceSvc.List()
+	nodes, _ := s.nodes.List()
+	subs, _ := s.subs.List(s.publicBase(c))
+	c.JSON(200, gin.H{"ok": true, "sources": sources, "nodes": nodes, "subscriptions": subs})
+}
+func (s *Server) suiInbounds(c *gin.Context) {
+	c.JSON(200, gin.H{"ok": true, "inbounds": []any{}, "message": "upstream inbound management adapter pending; source sync/subscription already available"})
+}
+func (s *Server) suiRealityQuick(c *gin.Context) {
+	c.JSON(501, gin.H{"ok": false, "error": "upstream one-click Reality is not enabled in subgo yet"})
+}
+func (s *Server) suiInboundRename(c *gin.Context) {
+	c.JSON(501, gin.H{"ok": false, "error": "upstream inbound rename is not enabled in subgo yet"})
+}
+func (s *Server) suiInboundDelete(c *gin.Context) {
+	c.JSON(501, gin.H{"ok": false, "error": "upstream inbound delete is not enabled in subgo yet"})
+}
+func (s *Server) kernelInstall(c *gin.Context) {
+	c.JSON(501, gin.H{"ok": false, "error": "mihomo binary install is pending; built-in TCP check is active"})
+}
+func (s *Server) kernelUninstall(c *gin.Context) {
+	c.JSON(501, gin.H{"ok": false, "error": "mihomo binary uninstall is pending; built-in TCP check is active"})
+}
+func (s *Server) bridgeMeta(c *gin.Context) {
+	c.JSON(200, gin.H{"ok": true, "enabled": false, "message": "bridge E2EE push is pending"})
+}
+func (s *Server) bridgePushSource(c *gin.Context) {
+	c.JSON(501, gin.H{"ok": false, "error": "bridge push-source is pending"})
+}
+
 func (s *Server) listNodes(c *gin.Context) {
 	v, err := s.nodes.List()
 	jsonResultKey(c, "nodes", v, err)
