@@ -684,10 +684,10 @@ async function checkConnectivity(){
   try{
     checkingConnectivity=true;
     const sourceId=(sourceViewId==='all'?0:Number(sourceViewId)||0);
-    if(nm){nm.textContent='';}
+    if(nm){nm.textContent='连通性检测中…';nm.className='muted';}
     await api('/api/nodes/connectivity/check',{method:'POST',body:JSON.stringify({sourceId,limit:50})});
     await loadNodes();
-    if(nm){nm.textContent='';}
+    if(nm){nm.textContent='连通性检测完成';nm.className='muted';setTimeout(()=>{if(nm)nm.textContent='';},3000);}
   }catch(e){
     if(nm){nm.className='err'; nm.textContent=e.message;}
   }finally{
