@@ -135,21 +135,30 @@ func ClashYAML(links []string) (string, error) {
 
 func clashProxy(raw string, idx int) map[string]any {
 	u, err := url.Parse(raw)
-	if err != nil {
-		return nil
-	}
 	p := ParseRawLink(raw)
 	name := p.Name
 	if name == "未命名节点" {
 		name = fmt.Sprintf("node-%d", idx)
 	}
-	q := u.Query()
-	host := u.Hostname()
+	host := p.Host
 	port := p.Port
+	if host == "" && err == nil {
+		host = u.Hostname()
+	}
+	if port == 0 && err == nil {
+		port, _ = strconv.Atoi(u.Port())
+	}
 	if host == "" || port == 0 {
 		return nil
 	}
-	security := strings.ToLower(q.Get("security"))
+	if host == "" || port == 0 {
+		return nil
+	}
+	var q url.Values
+	if err == nil {
+		q = u.Query()
+	}
+	security := strings.ToLower(first(q.Get("security"), "none"))
 	network := strings.ToLower(first(q.Get("type"), "tcp"))
 	fp := first(q.Get("fp"), "chrome")
 	sni := first(q.Get("sni"), q.Get("host"))
@@ -242,15 +251,27 @@ func clashProxy(raw string, idx int) map[string]any {
 		}
 		return m
 	case "ss":
-		method := u.User.Username()
-		pass, _ := u.User.Password()
-		if decoded, err := base64.RawStdEncoding.DecodeString(method); err == nil {
-			if parts := strings.SplitN(string(decoded), ":", 2); len(parts) == 2 {
-				method, pass = parts[0], parts[1]
+		method, pass := "", ""
+		// ss:// format: ss://base64(method:password@host:port)#name
+		after := raw[strings.Index(raw, "://")+3:]
+		if idx := strings.Index(after, "#"); idx >= 0 {
+			after = after[:idx]
+		}
+		if decoded, err := base64.RawStdEncoding.DecodeString(after); err == nil {
+			plain := string(decoded)
+			if at := strings.LastIndex(plain, "@"); at >= 0 {
+				userInfo := plain[:at]
+				if parts := strings.SplitN(userInfo, ":", 2); len(parts) == 2 {
+					method, pass = parts[0], parts[1]
+				}
 			}
-		} else if decoded, err := base64.StdEncoding.DecodeString(method); err == nil {
-			if parts := strings.SplitN(string(decoded), ":", 2); len(parts) == 2 {
-				method, pass = parts[0], parts[1]
+		} else if decoded, err := base64.StdEncoding.DecodeString(after); err == nil {
+			plain := string(decoded)
+			if at := strings.LastIndex(plain, "@"); at >= 0 {
+				userInfo := plain[:at]
+				if parts := strings.SplitN(userInfo, ":", 2); len(parts) == 2 {
+					method, pass = parts[0], parts[1]
+				}
 			}
 		}
 		return map[string]any{"name": name, "type": "ss", "server": host, "port": port, "cipher": method, "password": pass, "udp": true}
