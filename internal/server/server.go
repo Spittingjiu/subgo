@@ -3,8 +3,11 @@ package server
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/config"
@@ -65,6 +68,7 @@ func (s *Server) routes() {
 	s.router.GET("/api/auth/me", s.me)
 	s.router.GET("/sub/:token", s.subPlain)
 	s.router.GET("/api/sub/:token/plain", s.subPlain)
+	s.router.Any("/panel-proxy/:sourceId/*path", s.panelProxy)
 	s.router.GET("/sub/:token/clash", s.subClash)
 	s.router.GET("/api/sub/:token/clash", s.subClash)
 
@@ -180,9 +184,7 @@ func (s *Server) syncSource(c *gin.Context) {
 func (s *Server) syncAllSources(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true, "results": s.sourceSvc.SyncAll()})
 }
-func (s *Server) kernelStatus(c *gin.Context) {
-	c.JSON(200, gin.H{"ok": true, "installed": false, "mode": "tcp-check", "message": "subgo uses built-in TCP connectivity checks; mihomo install comes later"})
-}
+func (s *Server) kernelStatus(c *gin.Context) { c.JSON(200, s.conn.KernelStatus()) }
 func (s *Server) connectivityList(c *gin.Context) {
 	v, err := s.conn.List()
 	jsonResultKey(c, "connectivity", v, err)
@@ -222,23 +224,53 @@ func (s *Server) viewBootstrap(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true, "sources": sources, "nodes": nodes, "subscriptions": subs})
 }
 func (s *Server) suiInbounds(c *gin.Context) {
-	c.JSON(200, gin.H{"ok": true, "inbounds": []any{}, "message": "upstream inbound management adapter pending; source sync/subscription already available"})
+	id, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
+	v, err := s.sourceSvc.Inbounds(id)
+	jsonResultKey(c, "inbounds", v, err)
 }
 func (s *Server) suiRealityQuick(c *gin.Context) {
-	c.JSON(501, gin.H{"ok": false, "error": "upstream one-click Reality is not enabled in subgo yet"})
+	id, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
+	var req struct {
+		Remark string `json:"remark"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	v, err := s.sourceSvc.RealityQuick(id, req.Remark)
+	if err == nil {
+		_ = s.sourceSvc.Sync(id)
+	}
+	jsonResultKey(c, "obj", v, err)
 }
 func (s *Server) suiInboundRename(c *gin.Context) {
-	c.JSON(501, gin.H{"ok": false, "error": "upstream inbound rename is not enabled in subgo yet"})
+	sid, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
+	iid, _ := strconv.ParseInt(c.Param("inboundId"), 10, 64)
+	var req struct {
+		Remark string `json:"remark"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	err := s.sourceSvc.RenameInbound(sid, iid, req.Remark)
+	if err == nil {
+		_ = s.sourceSvc.Sync(sid)
+	}
+	jsonOK(c, err)
 }
 func (s *Server) suiInboundDelete(c *gin.Context) {
-	c.JSON(501, gin.H{"ok": false, "error": "upstream inbound delete is not enabled in subgo yet"})
+	sid, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
+	iid, _ := strconv.ParseInt(c.Param("inboundId"), 10, 64)
+	err := s.sourceSvc.DeleteInbound(sid, iid)
+	if err == nil {
+		_ = s.sourceSvc.Sync(sid)
+	}
+	jsonOK(c, err)
 }
 func (s *Server) kernelInstall(c *gin.Context) {
-	c.JSON(501, gin.H{"ok": false, "error": "mihomo binary install is pending; built-in TCP check is active"})
+	v, err := s.conn.InstallMihomo()
+	if err != nil {
+		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "version": v})
 }
-func (s *Server) kernelUninstall(c *gin.Context) {
-	c.JSON(501, gin.H{"ok": false, "error": "mihomo binary uninstall is pending; built-in TCP check is active"})
-}
+func (s *Server) kernelUninstall(c *gin.Context) { jsonOK(c, s.conn.UninstallMihomo()) }
 func (s *Server) bridgeMeta(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true, "enabled": false, "message": "bridge E2EE push is pending"})
 }
@@ -319,6 +351,110 @@ func (s *Server) deleteSubscription(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	jsonOK(c, s.subs.Delete(id))
 }
+
+func (s *Server) panelProxy(c *gin.Context) {
+	if _, ok := s.currentUser(c); !ok {
+		c.String(401, "unauthorized")
+		return
+	}
+	sid, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
+	src, err := s.sourceSvc.Get(sid)
+	if err != nil {
+		c.String(404, "source not found")
+		return
+	}
+	if src.Type == "local" {
+		c.String(400, "local source not supported")
+		return
+	}
+	base := strings.TrimRight(src.PanelURL, "/")
+	if strings.Contains(base, "/api/v1/sub/") {
+		if u, er := url.Parse(base); er == nil {
+			base = u.Scheme + "://" + u.Host
+		}
+	}
+	tail := c.Param("path")
+	target := base + tail
+	if c.Request.URL.RawQuery != "" {
+		target += "?" + c.Request.URL.RawQuery
+	}
+	if err := source.AssertURLSafe(target); err != nil {
+		c.String(403, err.Error())
+		return
+	}
+	method := c.Request.Method
+	if method == "TRACE" || method == "CONNECT" {
+		c.String(405, "method not allowed")
+		return
+	}
+	var body io.Reader
+	if method != "GET" && method != "HEAD" {
+		body = c.Request.Body
+	}
+	req, _ := http.NewRequest(method, target, body)
+	for _, h := range []string{"Accept", "Accept-Language", "Content-Type", "User-Agent"} {
+		if v := c.GetHeader(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+	if ck := filterProxyCookie(c.GetHeader("Cookie")); ck != "" {
+		req.Header.Set("Cookie", ck)
+	}
+	if src.PanelToken != "" {
+		req.Header.Set("X-Panel-Token", src.PanelToken)
+		req.Header.Set("Authorization", "Bearer "+src.PanelToken)
+	}
+	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		c.String(502, "panel proxy error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	for k, vals := range resp.Header {
+		lk := strings.ToLower(k)
+		if lk == "content-length" || lk == "set-cookie" {
+			continue
+		}
+		for _, v := range vals {
+			c.Writer.Header().Add(k, v)
+		}
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		if u, er := url.Parse(loc); er == nil {
+			if !u.IsAbs() {
+				loc = "/panel-proxy/" + strconv.FormatInt(sid, 10) + loc
+			}
+		}
+		c.Header("Location", loc)
+	}
+	for _, sc := range resp.Header.Values("Set-Cookie") {
+		c.Writer.Header().Add("Set-Cookie", rewriteProxySetCookie(sc, sid))
+	}
+	c.Status(resp.StatusCode)
+	_, _ = io.Copy(c.Writer, io.LimitReader(resp.Body, 16<<20))
+}
+func filterProxyCookie(raw string) string {
+	parts := strings.Split(raw, ";")
+	keep := []string{}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || strings.HasPrefix(p, "subgo_session=") {
+			continue
+		}
+		keep = append(keep, p)
+	}
+	return strings.Join(keep, "; ")
+}
+func rewriteProxySetCookie(raw string, sid int64) string {
+	parts := strings.Split(raw, ";")
+	if len(parts) == 0 {
+		return raw
+	}
+	out := []string{parts[0], "Path=/panel-proxy/" + strconv.FormatInt(sid, 10), "HttpOnly", "SameSite=Lax"}
+	return strings.Join(out, "; ")
+}
+
 func (s *Server) subClash(c *gin.Context) {
 	out, err := s.subs.Clash(c.Param("token"), c.ClientIP(), c.GetHeader("User-Agent"))
 	if err != nil {

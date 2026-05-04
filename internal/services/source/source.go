@@ -1,14 +1,18 @@
 package source
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +34,15 @@ type Source struct {
 	LastSyncStatus string  `json:"last_sync_status"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
+}
+type Inbound struct {
+	ID        int64  `json:"id"`
+	DisplayID string `json:"display_id"`
+	Remark    string `json:"remark"`
+	Protocol  string `json:"protocol"`
+	Port      any    `json:"port"`
+	Enable    bool   `json:"enable"`
+	Raw       any    `json:"raw,omitempty"`
 }
 
 func New(db *sql.DB) *Service {
@@ -138,24 +151,62 @@ func (s *Service) Sync(id int64) error {
 }
 func (s *Service) fetchLinks(src Source) ([]string, error) {
 	switch src.Type {
-	case "cf_sub", "raw_sub", "sui_api":
+	case "cf_sub", "raw_sub":
 		return s.fetchSubURL(src.PanelURL, src.PanelToken)
 	case "sbui":
-		u := src.PanelURL
-		if !strings.Contains(u, "/api/v1/sub/") {
-			u = strings.TrimRight(u, "/") + "/api/v1/sub/default"
-		}
-		return s.fetchSubURL(u, src.PanelToken)
+		return s.fetchSbuiLinks(src)
+	case "sui_api":
+		return s.fetchSuiLinks(src)
 	default:
 		return nil, fmt.Errorf("unsupported source type %s", src.Type)
 	}
 }
+func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
+	inb, err := s.SuiJSON(src, "/api/inbounds", "GET", nil)
+	if err == nil {
+		if ok, _ := inb["success"].(bool); ok {
+			if arr, ok := inb["obj"].([]any); ok {
+				var links []string
+				for _, one := range arr {
+					m, _ := one.(map[string]any)
+					id := fmt.Sprint(m["id"])
+					if id == "" || id == "<nil>" {
+						continue
+					}
+					lj, er := s.SuiJSON(src, "/api/inbounds/"+id+"/links", "GET", nil)
+					if er != nil {
+						continue
+					}
+					if a, ok := lj["obj"].([]any); ok {
+						for _, v := range a {
+							if str := strings.TrimSpace(fmt.Sprint(v)); strings.Contains(str, "://") {
+								links = append(links, str)
+							}
+						}
+					}
+				}
+				if len(links) > 0 {
+					return subconv.ParseSubscriptionText(strings.Join(links, "\n")), nil
+				}
+			}
+		}
+	}
+	return s.fetchSubURL(src.PanelURL, src.PanelToken)
+}
+func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
+	u := src.PanelURL
+	if !strings.Contains(u, "/api/v1/sub/") {
+		u = strings.TrimRight(u, "/") + "/api/v1/sub/default"
+	}
+	return s.fetchSubURL(u, src.PanelToken)
+}
 func (s *Service) fetchSubURL(raw, token string) ([]string, error) {
-	if err := assertURLSafe(raw); err != nil {
+	if err := AssertURLSafe(raw); err != nil {
 		return nil, err
 	}
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", raw, nil)
-	req.Header.Set("User-Agent", "subgo/0.2")
+	req.Header.Set("User-Agent", "subgo/0.4")
+	req.Header.Set("Accept", "text/plain,*/*")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -180,11 +231,9 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
-	seen := map[string]bool{}
 	for _, raw := range links {
 		p := subconv.ParseRawLink(raw)
 		h := subconv.StableHash(raw)
-		seen[h] = true
 		var exists int64
 		_ = tx.QueryRow(`SELECT id FROM nodes WHERE node_hash=?`, h).Scan(&exists)
 		if exists > 0 {
@@ -201,7 +250,186 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 	}
 	return tx.Commit()
 }
-func assertURLSafe(raw string) error {
+
+func (s *Service) Inbounds(sourceID int64) ([]Inbound, error) {
+	src, err := s.Get(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	switch src.Type {
+	case "sbui":
+		j, err := s.SbuiJSON(src, "/api/v1/inbounds", "GET", nil)
+		if err != nil {
+			return nil, err
+		}
+		return normalizeInboundArray(firstArray(j, "obj", "inbounds")), nil
+	case "sui_api":
+		j, err := s.SuiJSON(src, "/api/inbounds", "GET", nil)
+		if err != nil {
+			return nil, err
+		}
+		return normalizeInboundArray(firstArray(j, "obj", "inbounds")), nil
+	default:
+		return nil, errors.New("only sui_api/sbui source supports inbounds")
+	}
+}
+func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, error) {
+	src, err := s.Get(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if remark == "" {
+		remark = fmt.Sprintf("quick-%d", time.Now().Unix())
+	}
+	if src.Type == "sbui" {
+		return s.SbuiJSON(src, "/api/v1/quick/reality", "POST", map[string]any{"remark": remark})
+	}
+	if src.Type == "sui_api" {
+		return s.SuiJSON(src, "/api/inbounds/add-reality-quick", "POST", map[string]any{"remark": remark})
+	}
+	return nil, errors.New("only sui_api/sbui source supports reality quick")
+}
+func (s *Service) RenameInbound(sourceID, inboundID int64, remark string) error {
+	src, err := s.Get(sourceID)
+	if err != nil {
+		return err
+	}
+	if remark == "" {
+		return errors.New("remark required")
+	}
+	if src.Type == "sbui" {
+		_, err = s.SbuiJSON(src, fmt.Sprintf("/api/v1/inbounds/%d/rename", inboundID), "PUT", map[string]any{"remark": remark})
+		return err
+	}
+	if src.Type == "sui_api" {
+		_, err = s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d", inboundID), "PUT", map[string]any{"remark": remark})
+		return err
+	}
+	return errors.New("only sui_api/sbui source supports rename")
+}
+func (s *Service) DeleteInbound(sourceID, inboundID int64) error {
+	src, err := s.Get(sourceID)
+	if err != nil {
+		return err
+	}
+	if src.Type == "sbui" {
+		_, err = s.SbuiJSON(src, fmt.Sprintf("/api/v1/inbounds/%d", inboundID), "DELETE", nil)
+		return err
+	}
+	if src.Type == "sui_api" {
+		_, err = s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d", inboundID), "DELETE", nil)
+		return err
+	}
+	return errors.New("only sui_api/sbui source supports delete")
+}
+func (s *Service) SuiJSON(src Source, path, method string, body any) (map[string]any, error) {
+	base := strings.TrimRight(src.PanelURL, "/")
+	if err := AssertURLSafe(base); err != nil {
+		return nil, err
+	}
+	h := map[string]string{"x-panel-token": src.PanelToken, "content-type": "application/json", "accept": "application/json"}
+	return s.JSONRequest(base+path, method, h, body)
+}
+func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[string]any, error) {
+	base := normalizeSbuiBase(src.PanelURL)
+	if err := AssertURLSafe(base); err != nil {
+		return nil, err
+	}
+	token := src.PanelToken
+	h := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}
+	if token != "" {
+		h["authorization"] = "Bearer " + token
+	}
+	if body != nil {
+		h["content-type"] = "application/json"
+	}
+	return s.JSONRequest(base+path, method, h, body)
+}
+func (s *Service) JSONRequest(raw, method string, headers map[string]string, body any) (map[string]any, error) {
+	if err := AssertURLSafe(raw); err != nil {
+		return nil, err
+	}
+	var br io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		br = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, raw, br)
+	for k, v := range headers {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	text, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	var j map[string]any
+	_ = json.Unmarshal(text, &j)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return j, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if j == nil {
+		return map[string]any{}, nil
+	}
+	return j, nil
+}
+func normalizeSbuiBase(raw string) string {
+	base := strings.TrimRight(raw, "/")
+	if strings.Contains(base, "/api/v1/sub/") {
+		if u, err := url.Parse(base); err == nil {
+			return u.Scheme + "://" + u.Host
+		}
+	}
+	return base
+}
+func firstArray(j map[string]any, keys ...string) []any {
+	for _, k := range keys {
+		if a, ok := j[k].([]any); ok {
+			return a
+		}
+	}
+	return nil
+}
+func normalizeInboundArray(arr []any) []Inbound {
+	out := []Inbound{}
+	for _, v := range arr {
+		m, _ := v.(map[string]any)
+		id := toInt64(m["id"])
+		proto := fmt.Sprint(firstVal(m, "protocol", "type"))
+		out = append(out, Inbound{ID: id, DisplayID: fmt.Sprintf("%03d", id), Remark: fmt.Sprint(firstVal(m, "remark", "tag", "node_name")), Protocol: proto, Port: firstVal(m, "port", "listen_port"), Enable: fmt.Sprint(firstVal(m, "enable", "enabled")) != "false", Raw: m})
+	}
+	return out
+}
+func firstVal(m map[string]any, keys ...string) any {
+	for _, k := range keys {
+		if v, ok := m[k]; ok && v != nil {
+			return v
+		}
+	}
+	return ""
+}
+func toInt64(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case string:
+		i, _ := strconv.ParseInt(x, 10, 64)
+		return i
+	}
+	return 0
+}
+
+func AssertURLSafe(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
@@ -229,4 +457,12 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+func GzipDecode(b []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
 }

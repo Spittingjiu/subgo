@@ -91,8 +91,8 @@
 | 功能 | 旧 Sub endpoint | subgo 状态 | Go 优势落地 |
 |---|---|---:|---|
 | 内核状态 | `GET /api/kernel/status` | 🟡 | 初版返回 TCP 检测模式，mihomo 安装后续补 |
-| 安装 mihomo | `POST /api/kernel/install` | ⬜ | 下载校验、原子替换 |
-| 卸载 mihomo | `POST /api/kernel/uninstall` | ⬜ | 安全删除指定路径 |
+| 安装 mihomo | `POST /api/kernel/install` | ✅ | GitHub latest linux-amd64 下载、gzip 解压、原子替换、版本校验 |
+| 卸载 mihomo | `POST /api/kernel/uninstall` | ✅ | 仅删除 `/usr/local/bin/mihomo` |
 | 单批检测 | `POST /api/nodes/connectivity/check` | ✅ | TCP context timeout + worker pool |
 | 检测结果 | `GET /api/nodes/connectivity` | ✅ | latency/status/error |
 | 手动全量检测 | `POST /api/admin/connectivity/run-now` | ✅ | 初版同步执行 |
@@ -102,11 +102,11 @@
 
 | 功能 | 旧 Sub endpoint | subgo 状态 | 备注 |
 |---|---|---:|---|
-| 安全反代 | `ALL /panel-proxy/:sourceId/*` | ⬜ 🔒 | Cookie/Origin/Referer 改写，SSRF 防线 |
-| SUI inbound 列表 | `GET /api/sui/:sourceId/inbounds` | ⬜ | SUI adapter |
-| 一键 Reality | `POST /api/sui/:sourceId/reality-quick` | ⬜ | 上游创建，不是本机创建 |
-| inbound 重命名 | `PUT /api/sui/:sourceId/inbounds/:inboundId/rename` | ⬜ | SUI/SBUI 分支适配 |
-| inbound 删除 | `DELETE /api/sui/:sourceId/inbounds/:inboundId` | ⬜ | 高风险操作需确认/审计 |
+| 安全反代 | `ALL /panel-proxy/:sourceId/*` | ✅ 🔒 | Cookie 过滤、Set-Cookie 路径改写、SSRF 防线 |
+| SUI inbound 列表 | `GET /api/sui/:sourceId/inbounds` | ✅ | SUI/SBUI adapter 真实请求 |
+| 一键 Reality | `POST /api/sui/:sourceId/reality-quick` | ✅ | 调上游 SUI/SBUI 创建并同步 |
+| inbound 重命名 | `PUT /api/sui/:sourceId/inbounds/:inboundId/rename` | ✅ | SUI/SBUI 分支适配 |
+| inbound 删除 | `DELETE /api/sui/:sourceId/inbounds/:inboundId` | 🟡 | 真实删除已接入，前端确认/审计后续增强 |
 | SUI bridge push | `POST /api/bridge/push-source` | ⬜ | 后置，E2EE meta 一起做 |
 
 ## 8. 前端页面
@@ -143,7 +143,7 @@
 7. ⬜ SUI source adapter
 8. ✅ 连通性检测 worker pool
 9. 🟡 前端管理台补齐
-10. ⬜ panel proxy 与上游管理能力
+10. ✅ panel proxy 与上游管理能力
 11. ⬜ 灰度对比旧 Sub 行为，逐项补齐
 
 ## 11. 不做/后置

@@ -1,15 +1,29 @@
 package connectivity
 
 import (
+	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/subconv"
 )
+
+const MihomoBin = "/usr/local/bin/mihomo"
+const MihomoTmp = "/opt/subgo/mihomo-install"
 
 type Service struct{ db *sql.DB }
 type Result struct {
@@ -19,10 +33,112 @@ type Result struct {
 	LastError string `json:"last_error"`
 	CheckedAt string `json:"checked_at"`
 }
+type KernelStatus struct {
+	OK        bool   `json:"ok"`
+	Installed bool   `json:"installed"`
+	Version   string `json:"version"`
+	Path      string `json:"path"`
+	Mode      string `json:"mode"`
+}
 
 func New(db *sql.DB) *Service { return &Service{db: db} }
 func (s *Service) EnsureSchema() {
 	s.db.Exec(`CREATE TABLE IF NOT EXISTS node_connectivity (node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, status TEXT NOT NULL, latency_ms INTEGER, last_error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)`)
+}
+func (s *Service) KernelStatus() KernelStatus {
+	st := KernelStatus{OK: true, Path: MihomoBin, Mode: "tcp-check"}
+	if _, err := os.Stat(MihomoBin); err == nil {
+		st.Installed = true
+		out, _ := exec.Command(MihomoBin, "-v").CombinedOutput()
+		st.Version = strings.TrimSpace(string(out))
+		st.Mode = "mihomo+tcp"
+	}
+	return st
+}
+func (s *Service) InstallMihomo() (string, error) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return "", errors.New("auto install currently supports linux/amd64")
+	}
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest", nil)
+	req.Header.Set("User-Agent", "subgo")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("fetch release HTTP %d", resp.StatusCode)
+	}
+	var rel struct {
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", err
+	}
+	var url string
+	for _, a := range rel.Assets {
+		n := strings.ToLower(a.Name)
+		if strings.Contains(n, "linux-amd64-compatible") && strings.HasSuffix(n, ".gz") {
+			url = a.URL
+			break
+		}
+	}
+	if url == "" {
+		for _, a := range rel.Assets {
+			n := strings.ToLower(a.Name)
+			if strings.Contains(n, "linux-amd64") && strings.HasSuffix(n, ".gz") {
+				url = a.URL
+				break
+			}
+		}
+	}
+	if url == "" {
+		return "", errors.New("no linux-amd64 mihomo asset found")
+	}
+	r, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer r.Body.Close()
+	if r.StatusCode < 200 || r.StatusCode >= 300 {
+		return "", fmt.Errorf("download HTTP %d", r.StatusCode)
+	}
+	gz, err := gzip.NewReader(r.Body)
+	if err != nil {
+		return "", err
+	}
+	defer gz.Close()
+	if err := os.MkdirAll(MihomoTmp, 0755); err != nil {
+		return "", err
+	}
+	tmp := filepath.Join(MihomoTmp, "mihomo.new")
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, gz); err != nil {
+		f.Close()
+		return "", err
+	}
+	f.Close()
+	if err := os.Rename(tmp, MihomoBin); err != nil {
+		return "", err
+	}
+	_ = os.Chmod(MihomoBin, 0755)
+	out, err := exec.Command(MihomoBin, "-v").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("verify failed: %s", strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+func (s *Service) UninstallMihomo() error {
+	if _, err := os.Stat(MihomoBin); err == nil {
+		return os.Remove(MihomoBin)
+	}
+	return nil
 }
 func (s *Service) List() ([]Result, error) {
 	s.EnsureSchema()
