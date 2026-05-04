@@ -4,20 +4,22 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/subconv"
@@ -48,12 +50,11 @@ func (s *Service) EnsureSchema() {
 	s.db.Exec(`CREATE TABLE IF NOT EXISTS node_connectivity (node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, status TEXT NOT NULL, latency_ms INTEGER, last_error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)`)
 }
 func (s *Service) KernelStatus() KernelStatus {
-	st := KernelStatus{OK: true, Path: KernelBin, Mode: "tcp-check", Kernel: "sing-box"}
+	st := KernelStatus{OK: true, Path: KernelBin, Mode: "sing-box+proxy", Kernel: "sing-box"}
 	if _, err := os.Stat(KernelBin); err == nil {
 		st.Installed = true
 		out, _ := exec.Command(KernelBin, "version").CombinedOutput()
 		st.Version = strings.TrimSpace(string(out))
-		st.Mode = "sing-box+tcp"
 	}
 	return st
 }
@@ -202,63 +203,276 @@ func (s *Service) Check(limit int) ([]Result, error) {
 		_ = rows.Scan(&j.id, &j.raw)
 		jobs = append(jobs, j)
 	}
-	ch := make(chan job)
-	out := make(chan Result)
-	var wg sync.WaitGroup
-	workers := 8
-	if len(jobs) < workers {
-		workers = len(jobs)
-	}
-	if workers == 0 {
-		return []Result{}, nil
-	}
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range ch {
-				out <- s.checkOne(j.id, j.raw)
-			}
-		}()
-	}
-	go func() {
-		for _, j := range jobs {
-			ch <- j
-		}
-		close(ch)
-		wg.Wait()
-		close(out)
-	}()
 	var res []Result
-	for r := range out {
+	for _, j := range jobs {
+		r := s.checkWithSingBox(j.id, j.raw)
 		res = append(res, r)
 		s.save(r)
 	}
 	return res, nil
 }
-func (s *Service) checkOne(id int64, raw string) Result {
+
+func (s *Service) checkWithSingBox(id int64, raw string) Result {
 	p := subconv.ParseRawLink(raw)
 	now := time.Now().UTC().Format(time.RFC3339)
 	if p.Host == "" || p.Port == 0 {
 		return Result{NodeID: id, Status: "unknown", LastError: "missing host/port", CheckedAt: now}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	if _, err := os.Stat(KernelBin); err != nil {
+		return s.tcpCheck(id, raw, now)
+	}
+
+	dir, err := os.MkdirTemp("", "subgo-conn-")
+	if err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "temp dir failed", CheckedAt: now}
+	}
+	defer os.RemoveAll(dir)
+
+	port := 31000 + int(time.Now().UnixNano())%(60999-31000)
+	cfgPath := filepath.Join(dir, "config.json")
+	cfg := s.buildSingBoxCheckConfig(raw, p, port)
+	cfgJSON, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(cfgPath, cfgJSON, 0644); err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "config write failed", CheckedAt: now}
+	}
+
+	// Validate config
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	d := net.Dialer{}
+	checkCmd := exec.CommandContext(ctx, KernelBin, "check", "-c", cfgPath)
+	if out, err2 := checkCmd.CombinedOutput(); err2 != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: fmt.Sprintf("config: %s", trimLine(string(out))), CheckedAt: now}
+	}
+
+	// Start sing-box
+	runCtx, runCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer runCancel()
+	cmd := exec.CommandContext(runCtx, KernelBin, "run", "-c", cfgPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "sing-box start failed", CheckedAt: now}
+	}
+	defer func() { cmd.Process.Kill() }()
+
+	// Wait for port
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ready := false
+	for i := 0; i < 50; i++ {
+		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ready {
+		return Result{NodeID: id, Status: "fail", LastError: "proxy port not ready", CheckedAt: now}
+	}
+
+	// Test through proxy
 	start := time.Now()
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(p.Host, fmtPort(p.Port)))
+	testCtx, testCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer testCancel()
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", addr))
+	tr := &http.Transport{
+		Proxy:           http.ProxyURL(proxyURL),
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr, Timeout: 8 * time.Second}
+	testReq, _ := http.NewRequestWithContext(testCtx, "GET", "https://www.gstatic.com/generate_204", nil)
+	resp, err := client.Do(testReq)
+	lat := time.Since(start).Milliseconds()
+	if err != nil {
+		return Result{NodeID: id, Status: "fail", LastError: fmt.Sprintf("proxy: %s", trimStr(err.Error(), 160)), CheckedAt: now}
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return Result{NodeID: id, Status: "ok", LatencyMS: &lat, CheckedAt: now}
+	}
+	return Result{NodeID: id, Status: "fail", LastError: fmt.Sprintf("HTTP %d", resp.StatusCode), CheckedAt: now}
+}
+
+func (s *Service) tcpCheck(id int64, raw string, now string) Result {
+	p := subconv.ParseRawLink(raw)
+	if p.Host == "" || p.Port == 0 {
+		return Result{NodeID: id, Status: "unknown", LastError: "missing host/port", CheckedAt: now}
+	}
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(p.Host, strconv.Itoa(p.Port)), 4*time.Second)
 	if err != nil {
 		return Result{NodeID: id, Status: "fail", LastError: err.Error(), CheckedAt: now}
 	}
-	_ = conn.Close()
+	conn.Close()
 	ms := time.Since(start).Milliseconds()
 	return Result{NodeID: id, Status: "ok", LatencyMS: &ms, CheckedAt: now}
 }
+
 func (s *Service) save(r Result) {
-	var lat any = nil
+	var lat any
 	if r.LatencyMS != nil {
 		lat = *r.LatencyMS
 	}
 	_, _ = s.db.Exec(`INSERT INTO node_connectivity(node_id,status,latency_ms,last_error,checked_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET status=excluded.status,latency_ms=excluded.latency_ms,last_error=excluded.last_error,checked_at=excluded.checked_at`, r.NodeID, r.Status, lat, r.LastError, r.CheckedAt)
 }
-func fmtPort(p int) string { return strconv.Itoa(p) }
+
+func (s *Service) buildSingBoxCheckConfig(raw string, p subconv.ParsedLink, port int) map[string]any {
+	outboundTag := fmt.Sprintf("check-%d", port)
+	outbound := s.buildOutbound(raw, p, outboundTag)
+	return map[string]any{
+		"log": map[string]any{"level": "error"},
+		"inbounds": []map[string]any{
+			{"type": "http", "tag": "test-in", "listen": "127.0.0.1", "listen_port": port},
+		},
+		"outbounds": []map[string]any{
+			outbound,
+			{"type": "direct", "tag": "direct-out"},
+		},
+		"route": map[string]any{
+			"rules": []map[string]any{
+				{"inbound": "test-in", "outbound": outboundTag},
+			},
+		},
+	}
+}
+
+func (s *Service) buildOutbound(raw string, p subconv.ParsedLink, tag string) map[string]any {
+	host := p.Host
+	port := p.Port
+	proto := p.Protocol
+
+	switch proto {
+	case "vless":
+		m := map[string]any{
+			"type": "vless", "tag": tag, "server": host, "server_port": port,
+			"uuid": extractUUID(raw), "tls": map[string]any{"enabled": true},
+		}
+		if u, err := url.Parse(raw); err == nil {
+			q := u.Query()
+			network := orStr(q.Get("type"), "tcp")
+			sni := orStr(q.Get("sni"), q.Get("host"))
+			m["network"] = network
+			if sni != "" {
+				m["tls"].(map[string]any)["server_name"] = sni
+			}
+			if flow := q.Get("flow"); flow != "" && network != "xhttp" {
+				m["flow"] = flow
+			}
+			m["tls"].(map[string]any)["utls"] = map[string]any{
+				"enabled": true, "fingerprint": orStr(q.Get("fp"), "chrome"),
+			}
+			if q.Get("security") == "reality" && q.Get("pbk") != "" {
+				m["tls"].(map[string]any)["reality"] = map[string]any{
+					"enabled": true, "public_key": q.Get("pbk"), "short_id": q.Get("sid"),
+				}
+			}
+			switch network {
+			case "ws":
+				m["transport"] = map[string]any{
+					"type": "ws", "path": orStr(q.Get("path"), "/"),
+					"headers": map[string]any{"Host": orStr(sni, host)},
+				}
+			case "xhttp":
+				// sing-box uses tcp network + http transport for xhttp
+				m["network"] = "tcp"
+				m["transport"] = map[string]any{
+					"type": "http",
+					"host": []string{orStr(sni, host)},
+					"path": orStr(q.Get("path"), "/"),
+				}
+			}
+		}
+		return m
+
+	case "hysteria2", "hy2":
+		m := map[string]any{
+			"type": "hysteria2", "tag": tag, "server": host, "server_port": port,
+			"password": extractPass(raw), "tls": map[string]any{"enabled": true},
+		}
+		if u, err := url.Parse(raw); err == nil {
+			if sni := u.Query().Get("sni"); sni != "" {
+				m["tls"].(map[string]any)["server_name"] = sni
+			}
+			if u.Query().Get("insecure") == "1" {
+				m["tls"].(map[string]any)["insecure"] = true
+			}
+		}
+		return m
+
+	case "trojan":
+		m := map[string]any{
+			"type": "trojan", "tag": tag, "server": host, "server_port": port,
+			"password": extractPass(raw), "tls": map[string]any{"enabled": true},
+		}
+		if u, err := url.Parse(raw); err == nil {
+			if sni := u.Query().Get("sni"); sni != "" {
+				m["tls"].(map[string]any)["server_name"] = sni
+			}
+		}
+		return m
+
+	case "ss":
+		method, pass := extractSSMethod(raw)
+		return map[string]any{
+			"type": "shadowsocks", "tag": tag, "server": host, "server_port": port,
+			"method": method, "password": pass,
+		}
+
+	default:
+		return map[string]any{"type": "direct", "tag": tag}
+	}
+}
+
+func extractUUID(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.User.Username()
+	}
+	return "00000000-0000-0000-0000-000000000000"
+}
+func extractPass(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.User.Username()
+	}
+	return ""
+}
+func extractSSMethod(raw string) (string, string) {
+	after := raw
+	if i := strings.Index(raw, "://"); i >= 0 {
+		after = raw[i+3:]
+	}
+	if idx := strings.Index(after, "#"); idx >= 0 {
+		after = after[:idx]
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(after)
+	if err != nil {
+		decoded, err = base64.StdEncoding.DecodeString(after)
+	}
+	if err == nil {
+		plain := string(decoded)
+		if at := strings.LastIndex(plain, "@"); at >= 0 {
+			userInfo := plain[:at]
+			if parts := strings.SplitN(userInfo, ":", 2); len(parts) == 2 {
+				return parts[0], parts[1]
+			}
+		}
+	}
+	return "none", ""
+}
+func orStr(v, fb string) string {
+	if v != "" {
+		return v
+	}
+	return fb
+}
+func trimLine(s string) string {
+	if idx := strings.IndexAny(s, "\r\n"); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return strings.TrimSpace(s)
+}
+func trimStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
