@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/config"
@@ -25,14 +28,16 @@ import (
 const Version = "0.9.0-dev"
 
 type Server struct {
-	cfg       config.Config
-	db        *db.DB
-	auth      *auth.Service
-	nodes     *node.Service
-	subs      *subscription.Service
-	sourceSvc *source.Service
-	conn      *connectivity.Service
-	router    *gin.Engine
+	cfg          config.Config
+	db           *db.DB
+	auth         *auth.Service
+	nodes        *node.Service
+	subs         *subscription.Service
+	sourceSvc    *source.Service
+	conn         *connectivity.Service
+	router       *gin.Engine
+	templateData []byte
+	templateMu   sync.RWMutex
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -45,6 +50,8 @@ func New(cfg config.Config) (*Server, error) {
 	r.Use(gin.Recovery(), requestID(), accessHeaders())
 	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), router: r}
 	s.routes()
+	// Fetch clash template in background
+	go s.refreshClashTemplate()
 	return s, nil
 }
 
@@ -553,8 +560,49 @@ func rewriteProxySetCookie(raw string, sid int64) string {
 	return strings.Join(out, "; ")
 }
 
+func (s *Server) clashTemplate() []byte {
+	s.templateMu.RLock()
+	defer s.templateMu.RUnlock()
+	return s.templateData
+}
+
+func (s *Server) refreshClashTemplate() {
+	url := s.cfg.ClashTemplateURL
+	if url == "" {
+		return
+	}
+	for {
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
+				return
+			}
+			req.Header.Set("User-Agent", "subgo")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+			if err != nil || len(body) == 0 {
+				return
+			}
+			s.templateMu.Lock()
+			s.templateData = body
+			s.templateMu.Unlock()
+			fmt.Println("[clash-template] refreshed")
+		}()
+		time.Sleep(5 * time.Minute)
+	}
+}
+
 func (s *Server) subClash(c *gin.Context) {
-	out, err := s.subs.Clash(c.Param("token"), c.ClientIP(), c.GetHeader("User-Agent"))
+	out, err := s.subs.Clash(c.Param("token"), c.ClientIP(), c.GetHeader("User-Agent"), s.clashTemplate())
 	if err != nil {
 		c.String(404, err.Error())
 		return

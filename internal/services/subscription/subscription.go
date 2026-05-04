@@ -120,10 +120,13 @@ func (s *Service) PlainLinks(token, clientIP, ua string) (string, error) {
 	return strings.Join(links, "\n") + "\n", nil
 }
 
-func (s *Service) Clash(token, clientIP, ua string) (string, error) {
+func (s *Service) Clash(token, clientIP, ua string, clashTemplate []byte) (string, error) {
 	plain, err := s.PlainLinks(token, clientIP, ua)
 	if err != nil {
 		return "", err
+	}
+	if len(clashTemplate) > 0 {
+		return subconv.ClashYAMLFromTemplate(subconv.ParseSubscriptionText(plain), clashTemplate)
 	}
 	return subconv.ClashYAML(subconv.ParseSubscriptionText(plain))
 }

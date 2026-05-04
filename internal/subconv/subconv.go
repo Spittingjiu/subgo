@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -97,6 +98,12 @@ func ParseSubscriptionText(text string) []string {
 }
 
 func ClashYAML(links []string) (string, error) {
+	return ClashYAMLFromTemplate(links, nil)
+}
+
+// ClashYAMLFromTemplate generates clash config. If templateYAML is non-empty,
+// it's used as the base (DNS, rules, rule-providers, etc.) and only proxies are overlaid.
+func ClashYAMLFromTemplate(links []string, templateYAML []byte) (string, error) {
 	proxies := []map[string]any{}
 	names := []string{}
 	for i, raw := range links {
@@ -105,6 +112,20 @@ func ClashYAML(links []string) (string, error) {
 			names = append(names, fmt.Sprint(px["name"]))
 		}
 	}
+
+	// If template provided, use it as base and overlay proxies
+	if len(templateYAML) > 0 {
+		var tmpl map[string]any
+		if err := yaml.Unmarshal(templateYAML, &tmpl); err == nil {
+			tmpl["proxies"] = proxies
+			// Rebuild proxy-server-nameserver-policy with real node domains
+			rebuildDNSProxyPolicy(tmpl, proxies)
+			b, err := yaml.Marshal(tmpl)
+			return string(b), err
+		}
+	}
+
+	// Fallback: built-in template
 	if len(names) == 0 {
 		names = []string{"DIRECT"}
 	}
@@ -131,6 +152,32 @@ func ClashYAML(links []string) (string, error) {
 	}
 	b, err := yaml.Marshal(root)
 	return string(b), err
+}
+
+// rebuildDNSProxyPolicy updates dns.proxy-server-nameserver-policy with real node domains.
+func rebuildDNSProxyPolicy(tmpl map[string]any, proxies []map[string]any) {
+	dnsRaw, ok := tmpl["dns"]
+	if !ok {
+		return
+	}
+	dns, ok := dnsRaw.(map[string]any)
+	if !ok {
+		return
+	}
+	fixed := map[string]any{"geosite:cn": []string{"223.5.5.5", "119.29.29.29"}}
+	seen := map[string]bool{"geosite:cn": true}
+	for _, p := range proxies {
+		server, _ := p["server"].(string)
+		if server == "" || seen[server] {
+			continue
+		}
+		seen[server] = true
+		if net.ParseIP(server) != nil {
+			continue
+		}
+		fixed[server] = []string{"223.5.5.5", "119.29.29.29"}
+	}
+	dns["proxy-server-nameserver-policy"] = fixed
 }
 
 func clashProxy(raw string, idx int) map[string]any {
