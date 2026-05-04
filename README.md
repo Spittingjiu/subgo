@@ -10,7 +10,7 @@ Go 语言重构版 Sub / sui-sub：面向多源节点聚合、订阅编排、连
 
 ## 当前状态
 
-仓库已初始化，处于重构准备阶段。详见 `docs/REWRITE_PLAN.md`。
+仓库已初始化，展示页已部署到 `https://subgo.zzao.de/`。功能差异清单见 `docs/FUNCTION_GAP_CHECKLIST.md`，后续按清单逐项补齐，功能上全面对标 Sub/sui-sub。
 
 ## 本地运行
 

@@ -64,10 +64,11 @@
 - 建立 Go module、目录结构、README、重构计划
 - 提供 health/version API
 
-### Phase 1：数据层与兼容 schema
-- 复刻旧 SQLite 表结构
-- migration 支持从 `sui-sub/data/sui-sub.db` 复制后直接读取
+### Phase 1：新数据层与 schema
+- 设计 subgo 新 SQLite schema
+- migration 显式版本化，可重复执行
 - 建 model 与 repository 层
+- 不优先读取旧 `sui-sub.db`，后期通过新增源逐个导入
 
 ### Phase 2：订阅核心链路
 - raw link 解析
@@ -91,10 +92,14 @@
 - panel proxy
 
 ### Phase 6：灰度上线
-- 旁路读取旧 DB 或迁移 DB
+- 使用新系统重新导入源
 - 与旧版输出逐项 diff
 - Nginx 新域名/路径灰度
 - 通过后再切正式入口
+
+## 功能对标清单
+
+详见 `docs/FUNCTION_GAP_CHECKLIST.md`。后续按清单逐项补齐，直到功能全面对标 Sub/sui-sub。
 
 ## 第一版验收标准
 
