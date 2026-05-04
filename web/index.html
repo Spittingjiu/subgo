@@ -6,24 +6,30 @@
   <title>subgo 订阅分发平台</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
-    :root{--bg:#07111f;--bg2:#0b1628;--card:rgba(11,24,42,.78);--line:rgba(125,211,252,.18);--line2:rgba(125,211,252,.28);--txt:#edf7ff;--muted:rgba(220,238,255,.68);--ok:#67f3b5;--err:#ff8d8d;--card-grad1:rgba(13,31,54,.92);--card-grad2:rgba(8,18,33,.92);--src-bg:rgba(6,18,32,.88);--src-line:rgba(45,212,191,.24);--modal-grad1:#10243d;--modal-grad2:#09172a;--capsule-bg:linear-gradient(90deg,#00add8,#2dd4bf);--capsule-fg:#03111d;--capsule-border:rgba(255,255,255,.2);--accent:#00add8;--accent2:#2dd4bf}
+    :root{--bg:#f5f5f7;--surface:#ffffff;--surface2:#fbfbfd;--text:#111111;--muted:#6e6e73;--line:#d2d2d7;--line2:#e5e5ea;--ok:#1d7f42;--err:#c62828;--accent:#111111;--soft:#f2f2f7;--shadow:0 18px 50px rgba(0,0,0,.08)}
     *{box-sizing:border-box}
-    body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;margin:0;background:radial-gradient(circle at 12% 0%,rgba(0,173,216,.28),transparent 32%),radial-gradient(circle at 88% 12%,rgba(45,212,191,.16),transparent 30%),linear-gradient(180deg,#07111f,#081426 48%,#06101d);color:var(--txt);line-height:1.45;transition:background .2s,color .2s;min-height:100dvh}
-    body.auth-mode{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:18px}
-    .wrap{max-width:1160px;margin:20px auto;padding:0 14px}
-    .card{background:linear-gradient(180deg,var(--card-grad1),var(--card-grad2));border:1px solid var(--line);border-radius:22px;padding:18px;margin-bottom:16px;box-shadow:0 22px 70px rgba(0,0,0,.28);backdrop-filter:blur(14px)}
-    input,button,select{border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--txt);padding:10px}
+    body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif;margin:0;background:var(--bg);color:var(--text);line-height:1.45;min-height:100dvh;letter-spacing:-.01em}
+    body.auth-mode{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:24px;background:linear-gradient(180deg,#fff,#f5f5f7)}
+    .wrap{max-width:1180px;margin:0 auto;padding:28px 18px 40px}
+    .card{background:var(--surface);border:1px solid var(--line2);border-radius:24px;padding:20px;margin-bottom:18px;box-shadow:var(--shadow)}
+    input,button,select,textarea{border-radius:14px;border:1px solid var(--line2);background:var(--surface2);color:var(--text);padding:11px 13px;outline:none}
     input, textarea, select { font-size:16px !important; }
-    input{width:100%;min-width:0;outline:none}
-    button{cursor:pointer;white-space:nowrap;transition:.2s transform,.2s border-color,.2s background;background:linear-gradient(90deg,var(--accent),var(--accent2));color:#03111d;font-weight:800;border:0}
-    button:hover{border-color:#6f7df6;transform:translateY(-1px)}
-    .grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px}
-    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    input:focus,select:focus,textarea:focus{border-color:#111;box-shadow:0 0 0 4px rgba(0,0,0,.06)}
+    input{width:100%;min-width:0}
+    button{cursor:pointer;white-space:nowrap;transition:.18s transform,.18s background,.18s border-color;background:#111;color:#fff;font-weight:650;border:1px solid #111}
+    button:hover{transform:translateY(-1px);background:#000}
+    button:active{transform:translateY(0)}
+    button[id^="tab"],button.ghost,#themeBtn{background:var(--surface);color:var(--text);border:1px solid var(--line);box-shadow:none}
+    .grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:12px}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .muted{color:var(--muted);font-size:13px}
     .ok{color:var(--ok)} .err{color:var(--err)} .hide{display:none}
-    .pill{padding:3px 8px;border-radius:999px;background:var(--capsule-bg);color:var(--capsule-fg);border:1px solid var(--capsule-border);display:inline-block;font-size:12px;font-weight:600}
-    table{width:100%;border-collapse:collapse;min-width:560px}
-    td,th{border-bottom:1px solid #243055;padding:4px 2px;text-align:left;font-size:13px}
+    .pill{padding:3px 9px;border-radius:999px;background:var(--soft);color:var(--text);border:1px solid var(--line2);display:inline-block;font-size:12px;font-weight:650}
+    table{width:100%;border-collapse:separate;border-spacing:0;min-width:560px;background:var(--surface);border-radius:18px;overflow:hidden;border:1px solid var(--line2)}
+    td,th{border-bottom:1px solid var(--line2);padding:9px 8px;text-align:left;font-size:13px}
+    th{color:var(--muted);font-weight:650;background:#fafafa}
+    tr:last-child td{border-bottom:0}
+    tr:hover td{background:#fafafa}
     #nodes table{min-width:520px}
     #nodes th:nth-child(1),#nodes td:nth-child(1){width:46px;padding-right:2px}
     #nodes th:nth-child(2),#nodes td:nth-child(2){width:82px;padding-left:2px;padding-right:2px}
@@ -31,44 +37,36 @@
     #nodes th:nth-child(4),#nodes td:nth-child(4){width:92px;padding-left:4px;padding-right:4px;white-space:nowrap;text-align:left}
     #nodes th:nth-child(5),#nodes td:nth-child(5){width:64px;white-space:nowrap}
     #nodes th:nth-child(6),#nodes td:nth-child(6){width:170px;white-space:nowrap}
-    .tab-on{background:linear-gradient(90deg,#00add8,#2dd4bf);border-color:#67e8f9;color:#03111d;box-shadow:0 8px 24px rgba(0,173,216,.22)}
-    .chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 8px;max-width:280px;border-radius:999px;background:var(--capsule-bg);color:var(--capsule-fg);border:1px solid var(--capsule-border);font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .sel-list{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px;margin-top:8px}
-    .src-item{padding:12px;border:1px solid var(--src-line);border-radius:12px;background:var(--src-bg);margin:8px 0}
+    .tab-on{background:#111!important;border-color:#111!important;color:#fff!important;box-shadow:none!important}
+    .chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 9px;max-width:280px;border-radius:999px;background:var(--soft);color:var(--text);border:1px solid var(--line2);font-size:12px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .sel-list{max-height:240px;overflow:auto;border:1px solid var(--line2);border-radius:18px;padding:8px;margin-top:8px;background:var(--surface2)}
+    .src-item{padding:14px;border:1px solid var(--line2);border-radius:20px;background:var(--surface2);margin:10px 0}
     .src-item .row{row-gap:10px}
-    #subs input[readonly]{max-width:320px;min-width:240px}
+    #subs input[readonly]{max-width:320px;min-width:240px;background:#fff}
     #nodes,#suiNodes{overflow-x:auto}
-    .modal-mask{position:fixed;inset:0;background:#0008;display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
+    .modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50;backdrop-filter:blur(10px)}
     .modal-mask.hide{display:none!important}
-    .modal-box{width:min(760px,96vw);max-height:88vh;overflow:auto;background:linear-gradient(180deg,var(--modal-grad1),var(--modal-grad2));border:1px solid #445189;border-radius:14px;padding:14px}
+    .modal-box{width:min(760px,96vw);max-height:88vh;overflow:auto;background:var(--surface);border:1px solid var(--line2);border-radius:26px;padding:18px;box-shadow:0 24px 80px rgba(0,0,0,.16)}
     #linkModal .modal-box{width:min(430px,95vw)}
-    #linkQr{width:220px;height:220px;border-radius:10px;border:1px solid #2b3963;background:#fff;padding:8px;display:block;margin:8px auto}
-    #loginCard{width:min(460px,94vw);padding:20px}
-
-    body.theme-light{--bg:#f2f6ff;--bg2:#ffffff;--card:#ffffff;--line:#d8e2ff;--line2:#c5d4ff;--txt:#1b2440;--muted:rgba(27,36,64,.68);--ok:#16a34a;--err:#dc2626;--card-grad1:#ffffff;--card-grad2:#f7faff;--src-bg:#f8fbff;--src-line:#d5e1ff;--modal-grad1:#ffffff;--modal-grad2:#f7faff;--capsule-bg:#324576;--capsule-fg:#f7f9ff;--capsule-border:#6f85bd}
-    body.theme-light .tab-on{color:#fff}
-
-    .capsule-toggle{display:inline-flex;align-items:center;gap:8px;margin-top:8px;padding:6px 10px;border:1px solid var(--capsule-border);border-radius:999px;background:var(--capsule-bg);color:var(--capsule-fg);cursor:pointer;max-width:100%}
+    #linkQr{width:220px;height:220px;border-radius:18px;border:1px solid var(--line2);background:#fff;padding:8px;display:block;margin:8px auto}
+    #loginCard{width:min(440px,94vw);padding:28px;border-radius:28px}
+    body.theme-light{--bg:#0b0b0c;--surface:#161617;--surface2:#1d1d1f;--text:#f5f5f7;--muted:#a1a1a6;--line:#3a3a3c;--line2:#2c2c2e;--soft:#242426;--shadow:0 20px 60px rgba(0,0,0,.35)}
+    body.theme-light input,body.theme-light select,body.theme-light textarea{background:#1d1d1f;color:#f5f5f7}
+    body.theme-light button{background:#f5f5f7;color:#111;border-color:#f5f5f7}
+    body.theme-light button[id^="tab"],body.theme-light button.ghost,body.theme-light #themeBtn{background:#161617;color:#f5f5f7;border-color:#3a3a3c}
+    body.theme-light .tab-on{background:#f5f5f7!important;color:#111!important;border-color:#f5f5f7!important}
+    body.theme-light table,body.theme-light .card,body.theme-light .modal-box{background:#161617}
+    body.theme-light th,body.theme-light tr:hover td{background:#1d1d1f}
+    .capsule-toggle{display:inline-flex;align-items:center;gap:8px;margin-top:8px;padding:7px 11px;border:1px solid var(--line2);border-radius:999px;background:var(--soft);color:var(--text);cursor:pointer;max-width:100%}
     .capsule-toggle input{width:15px;height:15px;flex:0 0 auto}
-    .capsule-toggle-text{color:var(--capsule-fg);font-size:13px;line-height:1.35;white-space:normal;overflow:visible;text-overflow:clip}
+    .capsule-toggle-text{color:var(--text);font-size:13px;line-height:1.35;white-space:normal;overflow:visible;text-overflow:clip}
     .modal-node-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-    .modal-node-item{background:#1c2b5a !important;border-color:#4e66a8 !important}
-    body.theme-light .modal-node-item{background:#f7faff !important;border-color:#d7e3ff !important;color:#1b2440 !important}
-    body.theme-light .modal-node-item div:first-child{color:#1b2440 !important}
-    body.theme-light .modal-node-item .muted,body.theme-light .modal-node-item div:nth-child(2){color:rgba(27,36,64,.68) !important}
-
-
-    .log-box{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--bg2)}
-
-    @media (max-width:860px){
-      .grid{grid-template-columns:1fr}
-      .wrap{padding:0 10px}
-      .card{padding:14px}
-      .row{gap:6px}
-      #subs input[readonly]{max-width:100%;min-width:0;width:100%}
-      .chip{max-width:100%}
-      .modal-node-grid{grid-template-columns:1fr}
-    }
+    .modal-node-item{background:var(--surface2)!important;border-color:var(--line2)!important;color:var(--text)!important}
+    .log-box{max-height:280px;overflow:auto;border:1px solid var(--line2);border-radius:18px;padding:10px;background:var(--surface2)}
+    details{border:1px solid var(--line2)!important;border-radius:18px!important;background:var(--surface2)!important;padding:10px 12px!important}
+    summary{list-style:none} summary::-webkit-details-marker{display:none}
+    h1,h2,h3{letter-spacing:-.035em}
+    @media (max-width:860px){.grid{grid-template-columns:1fr}.wrap{padding:14px 10px 28px}.card{padding:16px;border-radius:22px}.row{gap:7px}#subs input[readonly]{max-width:100%;min-width:0;width:100%}.chip{max-width:100%}.modal-node-grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -92,7 +90,7 @@
         <h1 style="margin:0;font-size:34px;letter-spacing:-.04em">🧭 subgo 控制台</h1><div class="muted">Go + sing-box 驱动的订阅编排平台</div>
       </div>
       <div class="row" style="gap:8px">
-        <button id="themeBtn" onclick="toggleTheme()">浅色主题</button>
+        <button id="themeBtn" onclick="toggleTheme()">黑色主题</button>
         <button onclick="logout()">退出登录</button>
       </div>
     </div>
@@ -293,7 +291,7 @@ function setAuthMode(v){document.body.classList.toggle('auth-mode',v)}
 function updateThemeButton(){
   const btn=q('#themeBtn');
   if(!btn) return;
-  btn.textContent = theme === 'light' ? '深色主题' : '浅色主题';
+  btn.textContent = theme === 'light' ? '深色主题' : '黑色主题';
 }
 function applyTheme(next='dark'){
   theme = (next === 'light') ? 'light' : 'dark';
