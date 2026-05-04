@@ -23,9 +23,9 @@
 
 | 功能 | 旧 Sub 状态 | subgo 状态 | Go 重构要求 |
 |---|---:|---:|---|
-| SQLite 数据存储 | ✅ | ⬜ | 新 schema 即可，不做旧 DB 迁移优先 |
-| schema migration | 部分隐式 ALTER | ⬜ | Go migration 显式版本化，可重复执行 |
-| repository 层 | 单文件 SQL | ⬜ | 强类型 repository + transaction |
+| SQLite 数据存储 | ✅ | ✅ | 新 schema 已落地，不做旧 DB 迁移优先 |
+| schema migration | 部分隐式 ALTER | 🟡 | 已有初版建表 migration，后续补版本号升级 |
+| repository 层 | 单文件 SQL | 🟡 | auth/node/subscription service 已拆出，后续继续 repository 化 |
 | 配置加载 | env + 常量 | ✅ 基础 | viper/env/file，保留 env 优先 |
 | 服务启动 | Node 单进程 | ✅ | Go 单二进制 + systemd |
 | 前端资源 | public 静态 | ⬜ | 后期 embed 到二进制 |
@@ -34,11 +34,11 @@
 
 | 功能 | 旧 Sub endpoint | subgo 状态 | 备注 |
 |---|---|---:|---|
-| 登录 | `POST /api/auth/login` | ⬜ | Cookie session 或 JWT cookie |
-| 登出 | `POST /api/auth/logout` | ⬜ | 清 cookie |
-| 当前用户 | `GET /api/auth/me` | ⬜ | 前端 bootstrap 依赖 |
-| 管理账号读取 | `GET /api/admin/user` | ⬜ | 不返回敏感信息 |
-| 管理账号修改 | `POST /api/admin/user` | ⬜ | 密码 hash 存储，禁止明文 |
+| 登录 | `POST /api/auth/login` | ✅ | HMAC Cookie session |
+| 登出 | `POST /api/auth/logout` | ✅ | 清 cookie |
+| 当前用户 | `GET /api/auth/me` | ✅ | 前端 bootstrap 可用 |
+| 管理账号读取 | `GET /api/admin/user` | ✅ | 不返回敏感信息 |
+| 管理账号修改 | `POST /api/admin/user` | ✅ | bcrypt hash 存储，禁止明文 |
 | CSRF/同源防护 | middleware | ⬜ 🔒 | Go middleware 下沉 |
 
 ## 3. 源管理（后期逐个导入源）
@@ -48,9 +48,9 @@
 | SUI API 源 `sui_api` | ✅ | ⬜ | 支持 token 或账号密码换 token |
 | SBUI/S-Matrix 源 `sbui` | ✅ | ⬜ | 支持 discover + `/api/v1/sub/default` |
 | Cloudflare/raw subscription `cf_sub` | ✅ | ⬜ | HTTP 拉取 + SSRF 防线 |
-| 本地节点 `local` | ✅ | ⬜ | 手工录入 raw link |
+| 本地节点 `local` | ✅ | ✅ | 已支持手工录入 raw link |
 | localhost 源兼容 | ✅ | ⬜ | 视情况保留 |
-| 源列表 | `GET /api/sources` | ⬜ | 支持状态、上次同步时间 |
+| 源列表 | `GET /api/sources` | 🟡 | 初版支持本地源列表 |
 | 新增源 | `POST /api/sources` | ⬜ | 新系统从零导入 |
 | 修改源 | `PUT /api/sources/:id` | ⬜ | token/地址/名称/启停 |
 | 删除源 | `DELETE /api/sources/:id` | ⬜ | 清关联节点与订阅引用 |
@@ -62,25 +62,25 @@
 
 | 功能 | 旧 Sub endpoint | subgo 状态 | 要求 |
 |---|---|---:|---|
-| 节点列表 | `GET /api/nodes` | ⬜ | 支持 source filter、enabled filter |
+| 节点列表 | `GET /api/nodes` | 🟡 | 初版列表已可用，filter 后续补 |
 | 前端节点视图 | `GET /api/view/nodes` | ⬜ | 可先由统一 API 替代 |
-| 节点稳定 hash | internal | ⬜ | raw link canonical hash |
-| 显示编号 | internal | ⬜ | 保持可读 ID，如 `S1-001`/`L-001` |
-| 节点开关 | `POST /api/nodes/:id/toggle` | ⬜ | 影响订阅输出 |
-| 节点重命名 | `PUT /api/nodes/:id/rename` | ⬜ | raw link name 同步改写 |
-| 本地节点新增 | `POST /api/local-nodes` | ⬜ | 输入 raw link，解析校验 |
-| 本地节点删除 | `DELETE /api/local-nodes/:id` | ⬜ | 仅 local 允许删除 |
-| 协议识别 | internal | ⬜ | vless/hy2/ss/trojan/vmess 等 |
+| 节点稳定 hash | internal | ✅ | raw link sha256 hash |
+| 显示编号 | internal | ✅ | 本地节点 `L-001` 起步 |
+| 节点开关 | `POST /api/nodes/:id/toggle` | ✅ | 影响订阅输出 |
+| 节点重命名 | `PUT /api/nodes/:id/rename` | ✅ | raw link fragment 同步改写 |
+| 本地节点新增 | `POST /api/local-nodes` | ✅ | 输入 raw link，解析校验 |
+| 本地节点删除 | `DELETE /api/local-nodes/:id` | ✅ | 仅 local 允许删除 |
+| 协议识别 | internal | 🟡 | 初版按 scheme 识别，后续补强类型参数解析 |
 
 ## 5. 订阅管理与输出
 
 | 功能 | 旧 Sub endpoint | subgo 状态 | Go 重构要求 |
 |---|---|---:|---|
-| 订阅列表 | `GET /api/subscriptions` | ⬜ | token、节点数、访问统计 |
-| 创建订阅 | `POST /api/subscriptions` | ⬜ | 按 source_ids/node_ids 组合 |
-| 修改订阅 | `PUT /api/subscriptions/:id` | ⬜ | 支持重命名、节点范围调整 |
-| 删除订阅 | `DELETE /api/subscriptions/:id` | ⬜ | 删除 token |
-| plain 输出 | `/sub/:token`, `/api/sub/:token/plain` | ⬜ | streaming writer |
+| 订阅列表 | `GET /api/subscriptions` | ✅ | token、访问统计初版可用 |
+| 创建订阅 | `POST /api/subscriptions` | ✅ | 支持 node_ids/source_ids |
+| 修改订阅 | `PUT /api/subscriptions/:id` | ✅ | 支持重命名、节点范围调整、启停 |
+| 删除订阅 | `DELETE /api/subscriptions/:id` | ✅ | 删除 token |
+| plain 输出 | `/sub/:token`, `/api/sub/:token/plain` | ✅ | 初版 plain 输出可用，streaming writer 后续优化 |
 | Clash/Mihomo 输出 | `/sub/:token/clash` | ⬜ | 强类型生成 YAML |
 | 订阅访问日志 | `GET /api/admin/subscription-logs` | ⬜ | 异步/批量写，避免阻塞拉订阅 |
 | 自动裁剪不可用节点 | 字段已存在 | ⬜ | 和连通性检测联动 |
@@ -136,7 +136,7 @@
 
 1. ⬜ 新 schema + migration + repository
 2. ⬜ 登录/session/admin settings
-3. ⬜ local node + plain subscription 输出（最快形成闭环）
+3. ✅ local node + plain subscription 输出（最快形成闭环）
 4. ⬜ raw/cf_sub source 导入与同步
 5. ⬜ subscription CRUD + Clash/Mihomo 输出
 6. ⬜ SBUI source adapter

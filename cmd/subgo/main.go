@@ -10,7 +10,12 @@ import (
 func main() {
 	cfg := config.Load()
 	log.Printf("subgo listening on %s", cfg.Addr)
-	if err := server.New(cfg).Run(); err != nil {
+	srv, err := server.New(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer srv.Close()
+	if err := srv.Run(); err != nil {
 		log.Fatal(err)
 	}
 }
