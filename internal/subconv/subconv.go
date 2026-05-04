@@ -110,9 +110,24 @@ func ClashYAML(links []string) (string, error) {
 	}
 	root := map[string]any{
 		"mixed-port": 7890, "allow-lan": true, "mode": "rule", "log-level": "info",
-		"proxies":      proxies,
-		"proxy-groups": []map[string]any{{"name": "🚀 节点选择", "type": "select", "proxies": append([]string{"DIRECT"}, names...)}},
-		"rules":        []string{"MATCH,🚀 节点选择"},
+		"unified-delay": true, "tcp-concurrent": true, "ipv6": false,
+		"sniffer": map[string]any{
+			"enable": true,
+			"sniff": map[string]any{
+				"TLS":  map[string]any{"ports": []int{443, 8443}},
+				"HTTP": map[string]any{"ports": []string{"80", "8080-8880"}},
+			},
+			"skip-domain": []string{"Mijia Cloud", "+.push.apple.com", "geosite:cn"},
+		},
+		"proxies": proxies,
+		"proxy-groups": []map[string]any{
+			{"name": "🚀 节点选择", "type": "select", "proxies": append([]string{"手动选择", "自动选择"}, names...)},
+			{"name": "手动选择", "type": "select", "include-all": true, "proxies": []string{}, "exclude-filter": "^(?i:(DIRECT|REJECT|PASS))$"},
+			{"name": "自动选择", "type": "url-test", "include-all": true, "proxies": []string{}, "url": "https://cp.cloudflare.com/generate_204", "interval": 600, "tolerance": 100, "exclude-filter": "^(?i:(DIRECT|REJECT|PASS))$"},
+		},
+		"rules": []string{
+			"MATCH,🚀 节点选择",
+		},
 	}
 	b, err := yaml.Marshal(root)
 	return string(b), err
@@ -134,16 +149,52 @@ func clashProxy(raw string, idx int) map[string]any {
 	if host == "" || port == 0 {
 		return nil
 	}
+	security := strings.ToLower(q.Get("security"))
+	network := strings.ToLower(first(q.Get("type"), "tcp"))
+	fp := first(q.Get("fp"), "chrome")
+	sni := first(q.Get("sni"), q.Get("host"))
+
 	switch strings.ToLower(u.Scheme) {
 	case "vless":
-		m := map[string]any{"name": name, "type": "vless", "server": host, "port": port, "uuid": u.User.Username(), "network": first(q.Get("type"), "tcp"), "tls": q.Get("security") == "tls" || q.Get("security") == "reality", "udp": true}
-		if q.Get("flow") != "" {
-			m["flow"] = q.Get("flow")
+		m := map[string]any{
+			"name": name, "type": "vless", "server": host, "port": port,
+			"uuid": u.User.Username(), "udp": true, "network": network,
 		}
-		if q.Get("sni") != "" {
-			m["servername"] = q.Get("sni")
+		if security != "none" {
+			m["tls"] = true
 		}
-		if q.Get("security") == "reality" || q.Get("pbk") != "" {
+		flow := q.Get("flow")
+		if flow != "" && network != "xhttp" {
+			m["flow"] = flow
+		}
+		if sni != "" {
+			m["servername"] = sni
+		}
+		alpn := splitNonEmpty(q.Get("alpn"), ",")
+		if len(alpn) > 0 {
+			m["alpn"] = alpn
+		}
+		m["client-fingerprint"] = fp
+		if network == "ws" {
+			m["ws-opts"] = map[string]any{
+				"path":    first(q.Get("path"), "/"),
+				"headers": map[string]any{"Host": first(sni, host)},
+			}
+		}
+		if network == "xhttp" {
+			xhost := ""
+			if security == "reality" && sni != "" {
+				xhost = sni
+			} else {
+				xhost = q.Get("host")
+			}
+			xopts := map[string]any{"path": first(q.Get("path"), "/")}
+			if xhost != "" {
+				xopts["host"] = xhost
+			}
+			m["xhttp-opts"] = xopts
+		}
+		if security == "reality" || q.Get("pbk") != "" {
 			ro := map[string]any{}
 			if q.Get("pbk") != "" {
 				ro["public-key"] = q.Get("pbk")
@@ -151,40 +202,77 @@ func clashProxy(raw string, idx int) map[string]any {
 			if q.Get("sid") != "" {
 				ro["short-id"] = q.Get("sid")
 			}
+			if network != "xhttp" {
+				spx := first(first(q.Get("spx"), q.Get("spiderx")), "/")
+				ro["spider-x"] = spx
+			}
 			m["reality-opts"] = ro
 		}
 		return m
 	case "hysteria2", "hy2":
-		m := map[string]any{"name": name, "type": "hysteria2", "server": host, "port": port, "password": u.User.Username(), "udp": true}
-		if q.Get("sni") != "" {
-			m["sni"] = q.Get("sni")
+		m := map[string]any{
+			"name": name, "type": "hysteria2", "server": host, "port": port,
+			"password": u.User.Username(), "udp": true,
+		}
+		if sni != "" {
+			m["sni"] = sni
 		}
 		if q.Get("insecure") == "1" {
 			m["skip-cert-verify"] = true
 		}
+		if alpn := splitNonEmpty(q.Get("alpn"), ","); len(alpn) > 0 {
+			m["alpn"] = alpn
+		}
+		if q.Get("mport") != "" {
+			m["ports"] = q.Get("mport")
+		}
+		if q.Get("mportInterval") != "" {
+			if v, err := strconv.Atoi(q.Get("mportInterval")); err == nil && v > 0 {
+				m["hop-interval"] = v
+			}
+		}
 		return m
 	case "trojan":
-		m := map[string]any{"name": name, "type": "trojan", "server": host, "port": port, "password": u.User.Username(), "udp": true}
-		if q.Get("sni") != "" {
-			m["sni"] = q.Get("sni")
+		m := map[string]any{
+			"name": name, "type": "trojan", "server": host, "port": port,
+			"password": u.User.Username(), "udp": true,
+		}
+		if sni != "" {
+			m["sni"] = sni
 		}
 		return m
 	case "ss":
 		method := u.User.Username()
 		pass, _ := u.User.Password()
-		if strings.Contains(method, ":") {
-			parts := strings.SplitN(method, ":", 2)
-			method = parts[0]
-			pass = parts[1]
+		if decoded, err := base64.RawStdEncoding.DecodeString(method); err == nil {
+			if parts := strings.SplitN(string(decoded), ":", 2); len(parts) == 2 {
+				method, pass = parts[0], parts[1]
+			}
+		} else if decoded, err := base64.StdEncoding.DecodeString(method); err == nil {
+			if parts := strings.SplitN(string(decoded), ":", 2); len(parts) == 2 {
+				method, pass = parts[0], parts[1]
+			}
 		}
 		return map[string]any{"name": name, "type": "ss", "server": host, "port": port, "cipher": method, "password": pass, "udp": true}
 	default:
 		return nil
 	}
 }
+
 func first(v, fb string) string {
 	if v != "" {
 		return v
 	}
 	return fb
+}
+
+func splitNonEmpty(s, sep string) []string {
+	var out []string
+	for _, part := range strings.Split(s, sep) {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
