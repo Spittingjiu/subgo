@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "0.4.0-dev"
+const Version = "0.5.0-dev"
 
 type Server struct {
 	cfg       config.Config
@@ -104,6 +106,7 @@ func (s *Server) routes() {
 	api.POST("/nodes/:id/toggle", s.toggleNode)
 	api.PUT("/nodes/:id/rename", s.renameNode)
 	api.DELETE("/local-nodes/:id", s.deleteLocalNode)
+	api.DELETE("/local-nodes/:id/", s.deleteLocalNode)
 	api.GET("/subscriptions", s.listSubscriptions)
 	api.POST("/subscriptions", s.createSubscription)
 	api.PUT("/subscriptions/:id", s.updateSubscription)
@@ -130,7 +133,11 @@ func (s *Server) logout(c *gin.Context) {
 }
 func (s *Server) me(c *gin.Context) {
 	u, ok := s.currentUser(c)
-	c.JSON(200, gin.H{"ok": ok, "username": u})
+	if !ok {
+		c.JSON(401, gin.H{"ok": false, "error": "unauthorized"})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "username": u})
 }
 func (s *Server) adminUser(c *gin.Context) { a, err := s.auth.Admin(); jsonResult(c, a, err) }
 func (s *Server) updateAdminUser(c *gin.Context) {
@@ -162,16 +169,41 @@ func (s *Server) createSource(c *gin.Context) {
 func (s *Server) updateSource(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct {
-		Name       string `json:"name"`
-		PanelURL   string `json:"panel_url"`
-		PanelToken string `json:"panel_token"`
-		Enabled    bool   `json:"enabled"`
+		Name       *string `json:"name"`
+		PanelURL   *string `json:"panel_url"`
+		PanelToken *string `json:"panel_token"`
+		Enabled    any     `json:"enabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	jsonOK(c, s.sourceSvc.Update(id, req.Name, req.PanelURL, req.PanelToken, req.Enabled))
+	src, err := s.sourceSvc.Get(id)
+	if err != nil {
+		jsonOK(c, err)
+		return
+	}
+	name, panelURL, token, enabled := src.Name, src.PanelURL, src.PanelToken, src.Enabled
+	if req.Name != nil {
+		name = *req.Name
+	}
+	if req.PanelURL != nil {
+		panelURL = *req.PanelURL
+	}
+	if req.PanelToken != nil {
+		token = *req.PanelToken
+	}
+	if req.Enabled != nil {
+		switch v := req.Enabled.(type) {
+		case bool:
+			enabled = v
+		case float64:
+			enabled = v != 0
+		case string:
+			enabled = v != "0" && v != "false"
+		}
+	}
+	jsonOK(c, s.sourceSvc.Update(id, name, panelURL, token, enabled))
 }
 func (s *Server) deleteSource(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -195,7 +227,7 @@ func (s *Server) connectivityCheck(c *gin.Context) {
 	jsonResultKey(c, "results", v, err)
 }
 func (s *Server) subscriptionLogs(c *gin.Context) {
-	rows, err := s.db.Query(`SELECT id,token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at FROM subscription_logs ORDER BY id DESC LIMIT 200`)
+	rows, err := s.db.Query(`SELECT id,token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at FROM subscription_logs ORDER BY id DESC LIMIT ?`, limitParam(c, 200))
 	if err != nil {
 		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
 		return
@@ -528,6 +560,13 @@ func jsonResultKey(c *gin.Context, key string, v any, err error) {
 	}
 	c.JSON(200, gin.H{"ok": true, key: v})
 }
+func limitParam(c *gin.Context, def int) int {
+	v, _ := strconv.Atoi(c.Query("limit"))
+	if v <= 0 || v > 500 {
+		return def
+	}
+	return v
+}
 func errStatus(err error) int {
 	if errors.Is(err, sql.ErrNoRows) {
 		return 404
@@ -561,34 +600,16 @@ func (s *Server) home(c *gin.Context) {
 
 func (s *Server) app(c *gin.Context) {
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>subgo 管理台</title><style>
-:root{--bg:#07111f;--card:#101d31;--card2:#0d1829;--line:rgba(255,255,255,.12);--text:#eef6ff;--muted:#9fb0c6;--go:#00add8;--ok:#7cffc7;--bad:#ff7d7d}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"PingFang SC",sans-serif;background:radial-gradient(circle at 20% 0%,rgba(0,173,216,.22),transparent 34%),var(--bg);color:var(--text)}.wrap{max-width:1240px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}.brand h1{margin:0;font-size:42px;letter-spacing:-.05em}.brand p{margin:4px 0 0;color:var(--muted)}.card{background:rgba(16,29,49,.92);border:1px solid var(--line);border-radius:20px;padding:18px;margin:14px 0;box-shadow:0 18px 50px rgba(0,0,0,.22)}input,select,button,textarea{font-size:16px;border-radius:12px;border:1px solid rgba(255,255,255,.16);padding:11px;background:#0b1626;color:var(--text)}button{background:var(--go);color:#06111f;font-weight:800;cursor:pointer;border:0}button.ghost{background:#1b2a42;color:var(--text)}button.danger{background:#ff7d7d}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.muted{color:var(--muted);line-height:1.6}.item{border-top:1px solid var(--line);padding:12px 0;word-break:break-all}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#18304d;color:#bdefff;font-size:12px}.stat{font-size:28px;font-weight:900;color:var(--ok)}a{color:#7cffc7}.hidden{display:none!important}.full{grid-column:1/-1}textarea{width:100%;min-height:92px}.toast{position:fixed;right:18px;bottom:18px;background:#10243d;border:1px solid var(--line);padding:12px 14px;border-radius:12px;max-width:360px}.tabs button{margin-right:8px;margin-bottom:8px}@media(max-width:900px){.grid{grid-template-columns:1fr}.top{display:block}.brand h1{font-size:34px}}
-</style></head><body><div class="wrap"><div class="top"><div class="brand"><h1>subgo 管理台</h1><p>打开网页就能管理源、节点和订阅；默认账号 admin / admin123</p></div><div class="row"><a href="/about">项目说明</a><button id="logoutBtn" class="ghost hidden" onclick="doLogout()">退出登录</button></div></div>
-<div id="loginBox" class="card"><h2>登录</h2><p class="muted">登录后可以添加订阅源、手动添加节点、生成 plain / Clash 订阅链接。</p><div class="row"><input id="u" value="admin" placeholder="用户名"><input id="p" value="admin123" type="password" placeholder="密码"><button onclick="doLogin()">登录进入管理台</button></div></div>
-<div id="mainApp" class="hidden"><div class="grid"><div class="card"><div class="muted">源数量</div><div id="statSources" class="stat">0</div></div><div class="card"><div class="muted">节点数量</div><div id="statNodes" class="stat">0</div></div><div class="card"><div class="muted">订阅数量</div><div id="statSubs" class="stat">0</div></div></div>
-<div class="card"><div class="tabs"><button onclick="loadAll()">刷新</button><button onclick="syncAll()">同步全部源</button><button onclick="checkConn()">检测连通性</button></div><span class="muted">常用流程：添加源或本地节点 → 创建订阅 → 复制 plain/Clash 链接到客户端。</span></div>
-<div class="grid"><div class="card"><h2>1. 添加源</h2><p class="muted">粘贴机场/面板订阅地址。SBUI 填面板地址即可。</p><input id="sn" placeholder="源名称，例如 AU 机器"><select id="st"><option value="cf_sub">普通订阅/raw</option><option value="sbui">SBUI / S-Matrix</option><option value="sui_api">SUI API/订阅</option></select><input id="su" placeholder="订阅或面板 URL"><input id="sk" placeholder="Token 可选"><button onclick="addSource()">添加源</button><div id="sources"></div></div>
-<div class="card"><h2>2. 本地节点</h2><p class="muted">临时手动录入单个 vless / hy2 / ss / trojan 链接。</p><textarea id="raw" placeholder="vless://...#节点名"></textarea><input id="nn" placeholder="节点名可选"><button onclick="addNode()">添加本地节点</button><div id="nodes"></div></div>
-<div class="card"><h2>3. 创建订阅</h2><p class="muted">节点 ID 留空表示输出全部可用节点。</p><input id="subname" placeholder="订阅名，例如 iPhone"><input id="nodeids" placeholder="节点ID，逗号分隔，空=全部"><button onclick="addSub()">创建订阅</button><div id="subs"></div></div>
-<div class="card full"><h2>状态与检测结果</h2><pre id="status" class="muted">等待操作...</pre></div></div></div></div><div id="toast" class="toast hidden"></div><script>
-const $=id=>document.getElementById(id);function show(msg){$('toast').textContent=msg;$('toast').classList.remove('hidden');setTimeout(()=>$('toast').classList.add('hidden'),2600)}
-async function api(path,opt={}){opt.headers=Object.assign({'Content-Type':'application/json'},opt.headers||{});let r=await fetch(path,opt);let t=await r.text();let j;try{j=JSON.parse(t)}catch(e){j={ok:r.ok,text:t}};if(!r.ok&&j.error)throw new Error(j.error);return j}
-function authed(on){$('loginBox').classList.toggle('hidden',on);$('mainApp').classList.toggle('hidden',!on);$('logoutBtn').classList.toggle('hidden',!on)}
-async function doLogin(){try{let j=await api('/api/auth/login',{method:'POST',body:JSON.stringify({username:$('u').value,password:$('p').value})}); if(j.ok){authed(true);show('登录成功');loadAll()}}catch(e){show('登录失败：'+e.message)}}
-async function doLogout(){await api('/api/auth/logout',{method:'POST'});authed(false)}
-async function loadAll(){try{let me=await api('/api/auth/me'); if(!me.ok){authed(false);return} authed(true); let so=await api('/api/sources'), no=await api('/api/nodes'), sub=await api('/api/subscriptions'), co=await api('/api/nodes/connectivity'); let sources=so.sources||[], nodes=no.nodes||[], subs=sub.subscriptions||[]; $('statSources').textContent=sources.length;$('statNodes').textContent=nodes.length;$('statSubs').textContent=subs.length; $('sources').innerHTML=sources.map(x=>'<div class=item><b>#'+x.id+' '+esc(x.name)+'</b> <span class=pill>'+esc(x.source_type)+'</span> <span class=pill>'+esc(x.last_sync_status||'')+'</span><br><span class=muted>'+esc(x.panel_url||'系统本地源')+'</span><br><button onclick="sync('+x.id+')">同步</button> '+(x.source_type==='local'?'':'<button class=danger onclick="delSource('+x.id+')">删除</button>')+'</div>').join(''); $('nodes').innerHTML=nodes.map(x=>'<div class=item><b>#'+x.id+' '+esc(x.display_no)+' '+esc(x.node_name)+'</b> <span class=pill>'+esc(x.protocol)+'</span> <span class=pill>'+(x.enabled?'启用':'禁用')+'</span><br><span class=muted>'+esc(x.raw_link)+'</span><br><button onclick="toggleNode('+x.id+','+(!x.enabled)+')">'+(x.enabled?'禁用':'启用')+'</button> <button class=ghost onclick="renNode('+x.id+')">改名</button> <button class=danger onclick="delNode('+x.id+')">删除本地</button></div>').join(''); $('subs').innerHTML=subs.map(x=>'<div class=item><b>#'+x.id+' '+esc(x.name)+'</b><br><a target=_blank href="'+x.plain_url+'">Plain 订阅</a> · <a target=_blank href="/sub/'+x.token+'/clash">Clash 订阅</a><br><button onclick="copy(\''+x.plain_url+'\')">复制 Plain</button> <button onclick="copy(location.origin+\'/sub/'+x.token+'/clash\')">复制 Clash</button></div>').join(''); $('status').textContent=JSON.stringify(co,null,2)}catch(e){show(e.message)}}
-function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-async function addSource(){try{await api('/api/sources',{method:'POST',body:JSON.stringify({name:$('sn').value,source_type:$('st').value,panel_url:$('su').value,panel_token:$('sk').value})});show('源已添加');loadAll()}catch(e){show(e.message)}}
-async function sync(id){try{await api('/api/sources/'+id+'/sync',{method:'POST'});show('同步完成');loadAll()}catch(e){show('同步失败：'+e.message);loadAll()}}
-async function syncAll(){try{$('status').textContent=JSON.stringify(await api('/api/sources/sync-all',{method:'POST'}),null,2);loadAll()}catch(e){show(e.message)}}
-async function delSource(id){if(confirm('删除这个源？')){await api('/api/sources/'+id,{method:'DELETE'});loadAll()}}
-async function addNode(){try{await api('/api/local-nodes',{method:'POST',body:JSON.stringify({raw_link:$('raw').value,name:$('nn').value})});show('节点已添加');loadAll()}catch(e){show(e.message)}}
-async function toggleNode(id,en){await api('/api/nodes/'+id+'/toggle',{method:'POST',body:JSON.stringify({enabled:en})});loadAll()}
-async function renNode(id){let name=prompt('新名称'); if(name){await api('/api/nodes/'+id+'/rename',{method:'PUT',body:JSON.stringify({name})});loadAll()}}
-async function delNode(id){if(confirm('删除这个本地节点？')){await api('/api/local-nodes/'+id,{method:'DELETE'});loadAll()}}
-async function addSub(){try{let ids=$('nodeids').value.split(',').map(x=>parseInt(x.trim())).filter(Boolean);await api('/api/subscriptions',{method:'POST',body:JSON.stringify({name:$('subname').value,node_ids:ids})});show('订阅已创建');loadAll()}catch(e){show(e.message)}}
-async function checkConn(){try{$('status').textContent=JSON.stringify(await api('/api/nodes/connectivity/check?limit=100',{method:'POST'}),null,2);loadAll()}catch(e){show(e.message)}}
-async function copy(t){await navigator.clipboard.writeText(t);show('已复制')}
-loadAll();
-</script></body></html>`)
+	paths := []string{
+		filepath.Join("web", "index.html"),
+		filepath.Join("src", "web", "index.html"),
+		filepath.Join("/opt/subgo/src/web", "index.html"),
+	}
+	for _, path := range paths {
+		if b, err := os.ReadFile(path); err == nil {
+			c.String(http.StatusOK, string(b))
+			return
+		}
+	}
+	c.String(http.StatusOK, "subgo 管理台文件缺失")
 }
