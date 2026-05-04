@@ -22,7 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "0.8.0-dev"
+const Version = "0.8.1-dev"
 
 type Server struct {
 	cfg       config.Config
