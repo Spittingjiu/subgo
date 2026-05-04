@@ -200,6 +200,12 @@
         <div class="muted" style="margin-bottom:8px">自动刷新，最多保留最近 10 条：更新时间、来源IP、UA与设备识别</div>
         <div id="subLogs" class="log-box">暂无日志</div>
       </div>
+      <div class="card">
+        <h3>操作审计</h3>
+        <div class="muted" style="margin:8px 0">记录一键 Reality、上游改名、上游删除等高风险操作。</div>
+        <button onclick="loadAuditLogs()">刷新审计</button>
+        <div id="auditLogs" class="log-box" style="margin-top:10px">暂无审计</div>
+      </div>
 
     </div>
   </div>
