@@ -43,6 +43,8 @@ func (d *DB) Migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id)`,
 		`CREATE TABLE IF NOT EXISTS node_connectivity (node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, status TEXT NOT NULL, latency_ms INTEGER, last_error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_sub_logs_created ON subscription_logs(created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Exec(s); err != nil {

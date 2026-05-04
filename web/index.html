@@ -6,16 +6,16 @@
   <title>subgo 订阅分发平台</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
-    :root{--bg:#0b1020;--bg2:#0f1730;--card:#121933;--line:#263258;--line2:#36446f;--txt:#eef2ff;--muted:rgba(238,242,255,.72);--ok:#7ef8a5;--err:#ff8f8f;--card-grad1:#121933;--card-grad2:#0f1730;--src-bg:#0d1530;--src-line:#2b3963;--modal-grad1:#161f43;--modal-grad2:#101834;--capsule-bg:#f8fbff;--capsule-fg:#121a33;--capsule-border:#e8efff}
+    :root{--bg:#07111f;--bg2:#0b1628;--card:rgba(11,24,42,.78);--line:rgba(125,211,252,.18);--line2:rgba(125,211,252,.28);--txt:#edf7ff;--muted:rgba(220,238,255,.68);--ok:#67f3b5;--err:#ff8d8d;--card-grad1:rgba(13,31,54,.92);--card-grad2:rgba(8,18,33,.92);--src-bg:rgba(6,18,32,.88);--src-line:rgba(45,212,191,.24);--modal-grad1:#10243d;--modal-grad2:#09172a;--capsule-bg:linear-gradient(90deg,#00add8,#2dd4bf);--capsule-fg:#03111d;--capsule-border:rgba(255,255,255,.2);--accent:#00add8;--accent2:#2dd4bf}
     *{box-sizing:border-box}
-    body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;margin:0;background:var(--bg);color:var(--txt);line-height:1.45;transition:background .2s,color .2s}
+    body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;margin:0;background:radial-gradient(circle at 12% 0%,rgba(0,173,216,.28),transparent 32%),radial-gradient(circle at 88% 12%,rgba(45,212,191,.16),transparent 30%),linear-gradient(180deg,#07111f,#081426 48%,#06101d);color:var(--txt);line-height:1.45;transition:background .2s,color .2s;min-height:100dvh}
     body.auth-mode{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:18px}
     .wrap{max-width:1160px;margin:20px auto;padding:0 14px}
-    .card{background:linear-gradient(180deg,var(--card-grad1),var(--card-grad2));border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 6px 20px rgba(0,0,0,.18)}
+    .card{background:linear-gradient(180deg,var(--card-grad1),var(--card-grad2));border:1px solid var(--line);border-radius:22px;padding:18px;margin-bottom:16px;box-shadow:0 22px 70px rgba(0,0,0,.28);backdrop-filter:blur(14px)}
     input,button,select{border-radius:10px;border:1px solid var(--line2);background:var(--bg2);color:var(--txt);padding:10px}
     input, textarea, select { font-size:16px !important; }
     input{width:100%;min-width:0;outline:none}
-    button{cursor:pointer;white-space:nowrap;transition:.2s transform,.2s border-color,.2s background}
+    button{cursor:pointer;white-space:nowrap;transition:.2s transform,.2s border-color,.2s background;background:linear-gradient(90deg,var(--accent),var(--accent2));color:#03111d;font-weight:800;border:0}
     button:hover{border-color:#6f7df6;transform:translateY(-1px)}
     .grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px}
     .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -31,7 +31,7 @@
     #nodes th:nth-child(4),#nodes td:nth-child(4){width:92px;padding-left:4px;padding-right:4px;white-space:nowrap;text-align:left}
     #nodes th:nth-child(5),#nodes td:nth-child(5){width:64px;white-space:nowrap}
     #nodes th:nth-child(6),#nodes td:nth-child(6){width:170px;white-space:nowrap}
-    .tab-on{background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-color:#6f7df6;color:#fff}
+    .tab-on{background:linear-gradient(90deg,#00add8,#2dd4bf);border-color:#67e8f9;color:#03111d;box-shadow:0 8px 24px rgba(0,173,216,.22)}
     .chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 8px;max-width:280px;border-radius:999px;background:var(--capsule-bg);color:var(--capsule-fg);border:1px solid var(--capsule-border);font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .sel-list{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px;margin-top:8px}
     .src-item{padding:12px;border:1px solid var(--src-line);border-radius:12px;background:var(--src-bg);margin:8px 0}
@@ -87,9 +87,9 @@
           <button id="tabHomeBtn" onclick="switchTab('home')">源</button>
           <button id="tabNodeBtn" onclick="switchTab('nodes')">节点&订阅</button>
           <button id="tabSuiBtn" onclick="switchTab('sui')">上游管理</button>
-          <button id="tabUserBtn" onclick="switchTab('user')">用户管理</button>
+          <button id="tabUserBtn" onclick="switchTab('user')">用户管理</button><button id="tabAuditBtn" onclick="switchTab('audit')">操作审计</button>
         </div>
-        <h1 style="margin:0">🚀 subgo 订阅分发平台</h1>
+        <h1 style="margin:0;font-size:34px;letter-spacing:-.04em">🧭 subgo 控制台</h1><div class="muted">Go + sing-box 驱动的订阅编排平台</div>
       </div>
       <div class="row" style="gap:8px">
         <button id="themeBtn" onclick="toggleTheme()">浅色主题</button>
@@ -206,6 +206,15 @@
     </div>
   </div>
 
+  <div id="tab-audit" class="hide">
+    <div class="card">
+      <h3 style="margin:0">操作审计</h3>
+      <div class="muted" style="margin:8px 0">记录一键 Reality、上游改名、上游删除等高风险操作。</div>
+      <button onclick="loadAuditLogs()">刷新审计</button>
+      <div id="auditLogs" class="log-box" style="margin-top:10px">暂无审计</div>
+    </div>
+  </div>
+
   <div id="subModal" class="modal-mask hide">
     <div class="modal-box">
       <div class="row" style="justify-content:space-between"><h3 id="subModalTitle" style="margin:0">编辑订阅</h3><button onclick="closeSubModal()">关闭</button></div>
@@ -299,10 +308,10 @@ function toggleTheme(){
 function switchTab(tab){
   activeTab=tab;
   try{ localStorage.setItem('sui_sub_last_tab', tab); }catch(_e){}
-  q('#tab-home').classList.toggle('hide',tab!=='home'); q('#tab-nodes').classList.toggle('hide',tab!=='nodes'); q('#tab-sui').classList.toggle('hide',tab!=='sui'); q('#tab-user').classList.toggle('hide',tab!=='user');
-  q('#tabHomeBtn').classList.toggle('tab-on',tab==='home'); q('#tabNodeBtn').classList.toggle('tab-on',tab==='nodes'); q('#tabSuiBtn').classList.toggle('tab-on',tab==='sui'); q('#tabUserBtn').classList.toggle('tab-on',tab==='user');
+  q('#tab-home').classList.toggle('hide',tab!=='home'); q('#tab-nodes').classList.toggle('hide',tab!=='nodes'); q('#tab-sui').classList.toggle('hide',tab!=='sui'); q('#tab-user').classList.toggle('hide',tab!=='user'); q('#tab-audit').classList.toggle('hide',tab!=='audit');
+  q('#tabHomeBtn').classList.toggle('tab-on',tab==='home'); q('#tabNodeBtn').classList.toggle('tab-on',tab==='nodes'); q('#tabSuiBtn').classList.toggle('tab-on',tab==='sui'); q('#tabUserBtn').classList.toggle('tab-on',tab==='user'); const ab=q('#tabAuditBtn'); if(ab) ab.classList.toggle('tab-on',tab==='audit');
   ['#kernelBadge','#kernelToggleBtn'].forEach(sel=>{const el=q(sel); if(el) el.style.display=(tab==='nodes')?'':'none';});
-  if(tab==='sui') loadSuiNodes(); if(tab==='user') loadAdminUser();
+  if(tab==='sui') loadSuiNodes(); if(tab==='user') loadAdminUser(); if(tab==='audit') loadAuditLogs();
 }
 
 async function checkAuth(){const r=await fetch('/api/auth/me'); if(r.status===200){q('#loginCard').classList.add('hide');q('#app').classList.remove('hide');setAuthMode(false);init();} else {q('#loginCard').classList.remove('hide');q('#app').classList.add('hide');setAuthMode(true);}}
@@ -935,9 +944,9 @@ async function saveSubModal(){
 
 function loadSuiSourceOptions(){const sel=q('#suiSource');if(!sel)return;const prev=sel.value;const suiSources=sources.filter(s=>(String(s?.source_type||'sui_api')==='sui_api'||isSbuiSource(s)) && !isLocalSource(s));sel.innerHTML=suiSources.length?suiSources.map(s=>`<option value="${Number(s.id||0)}">${esc(s.name||'')} (${esc(s.panel_url||'')})</option>`).join(''):'<option value="">暂无可管理的 SUI/SBUI 源</option>';if(prev&&[...sel.options].some(o=>o.value===prev))sel.value=prev;sel.onchange=()=>loadSuiNodes();}
 async function loadSuiNodes(){const sel=q('#suiSource'),box=q('#suiNodes');if(!sel||!sel.value){box.innerHTML='<div class="muted">暂无可管理的 SUI/SBUI 源（本地源不在此页管理）</div>';return;}const sourceId=Number(sel.value);try{const j=await api(`/api/sui/${sourceId}/inbounds`),arr=j.inbounds||[];if(!arr.length){box.innerHTML='<div class="muted">暂无节点</div>';return;}box.innerHTML=`<table><thead><tr><th>ID</th><th>备注</th><th>协议</th><th>端口</th><th>状态</th><th>操作</th></tr></thead><tbody>${arr.map(i=>`<tr><td title="真实ID: ${Number(i.id||0)}">${esc(i.display_id||String(Number(i.id||0)).padStart(3,'0'))}</td><td>${esc(i.remark||'')}</td><td>${esc(i.protocol||'')}</td><td>${esc(i.port||'')}</td><td>${i.enable?'<span class="ok">启用</span>':'<span class="err">停用</span>'}</td><td><button onclick="renameSuiInbound(${sourceId},${Number(i.id||0)},'${encodeURIComponent(i.remark||'')}')">改名</button> <button onclick="deleteSuiInbound(${sourceId},${Number(i.id||0)})">删除</button></td></tr>`).join('')}</tbody></table>`;}catch(e){box.innerHTML=`<div class="err">加载失败：${esc(e.message)}</div>`;}}
-async function quickReality(){const sel=q('#suiSource');if(!sel||!sel.value)return toast('请先选择可管理的 SUI/SBUI 源','err');const sourceId=Number(sel.value);const remark=(q('#realityName')?.value||'').trim()||`quick-${Date.now()}`;await api(`/api/sui/${sourceId}/reality-quick`,{method:'POST',body:JSON.stringify({remark})});q('#realityName').value='';toast(`已创建 Reality 节点：${remark}`,'ok');await refreshAll();await loadSuiNodes();}
+async function quickReality(){const sel=q('#suiSource');if(!sel||!sel.value)return toast('请先选择可管理的 SUI/SBUI 源','err');const sourceId=Number(sel.value);const remark=(q('#realityName')?.value||'').trim()||`quick-${Date.now()}`;if(!confirm('确认在上游创建 Reality 节点？'))return; await api(`/api/sui/${sourceId}/reality-quick`,{method:'POST',body:JSON.stringify({remark})});q('#realityName').value='';toast(`已创建 Reality 节点：${remark}`,'ok');await refreshAll();await loadSuiNodes();}
 async function renameSuiInbound(sourceId,inboundId,oldRemarkEnc=''){const old=decodeURIComponent(oldRemarkEnc||'');const remark=prompt('输入新备注：',old);if(remark===null)return;const v=String(remark||'').trim();if(!v)return toast('备注不能为空','err');await api(`/api/sui/${sourceId}/inbounds/${inboundId}/rename`,{method:'PUT',body:JSON.stringify({remark:v})});toast('节点备注已更新','ok');await refreshAll();await loadSuiNodes();}
-async function deleteSuiInbound(sourceId,inboundId){if(!confirm('确认删除该节点？'))return;await api(`/api/sui/${sourceId}/inbounds/${inboundId}`,{method:'DELETE'});toast('节点已删除','ok');await refreshAll();await loadSuiNodes();}
+async function deleteSuiInbound(sourceId,inboundId){const phrase=prompt('删除上游节点是高风险操作，输入 DELETE 确认'); if(phrase!=='DELETE')return;await api(`/api/sui/${sourceId}/inbounds/${inboundId}`,{method:'DELETE'});toast('节点已删除','ok');await refreshAll();await loadSuiNodes();}
 
 function renderConnectivityStatus(st={}){
   const el=q('#connectivityStatus');
@@ -1019,11 +1028,14 @@ async function refreshAll(){
     window.scrollTo(0,pageY);
   }
 }
+
+async function loadAuditLogs(){const box=q('#auditLogs'); if(!box)return; try{const j=await api('/api/admin/audit-logs?limit=80'); const logs=j.logs||[]; box.innerHTML=logs.length?logs.map(x=>`<div class="item"><b>${esc(x.action)}</b> <span class="pill">${esc(x.target_type)} #${esc(x.target_id)}</span><br><span class="muted">${esc(x.detail||'')} · ${esc(x.created_at||'')}</span></div>`).join(''):'暂无审计';}catch(e){box.innerHTML=`<span class="err">${esc(e.message)}</span>`;}}
+
 async function init(){
   let initialTab='home';
   try{
     const saved=localStorage.getItem('sui_sub_last_tab')||'home';
-    if(['home','nodes','sui','user'].includes(saved)) initialTab=saved;
+    if(['home','nodes','sui','user','audit'].includes(saved)) initialTab=saved;
   }catch(_e){}
   switchTab(initialTab);
   await refreshAll();

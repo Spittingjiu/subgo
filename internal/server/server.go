@@ -22,7 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "0.6.0-dev"
+const Version = "0.7.0-dev"
 
 type Server struct {
 	cfg       config.Config
@@ -88,6 +88,7 @@ func (s *Server) routes() {
 	api.POST("/nodes/connectivity/check", s.connectivityCheck)
 	api.POST("/admin/connectivity/run-now", s.connectivityCheck)
 	api.GET("/admin/subscription-logs", s.subscriptionLogs)
+	api.GET("/admin/audit-logs", s.auditLogs)
 	api.GET("/view/home", s.viewHome)
 	api.GET("/view/nodes", s.listNodes)
 	api.GET("/view/bootstrap", s.viewBootstrap)
@@ -243,6 +244,26 @@ func (s *Server) subscriptionLogs(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true, "logs": out})
 }
 
+func (s *Server) audit(action, targetType, targetID, detail string) {
+	_, _ = s.db.Exec(`INSERT INTO audit_logs(action,target_type,target_id,detail,created_at) VALUES(?,?,?,?,?)`, action, targetType, targetID, detail, time.Now().UTC().Format(time.RFC3339))
+}
+func (s *Server) auditLogs(c *gin.Context) {
+	rows, err := s.db.Query(`SELECT id,action,target_type,target_id,detail,created_at FROM audit_logs ORDER BY id DESC LIMIT ?`, limitParam(c, 100))
+	if err != nil {
+		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	out := []gin.H{}
+	for rows.Next() {
+		var id int64
+		var a, t, tid, d, ca string
+		_ = rows.Scan(&id, &a, &t, &tid, &d, &ca)
+		out = append(out, gin.H{"id": id, "action": a, "target_type": t, "target_id": tid, "detail": d, "created_at": ca})
+	}
+	c.JSON(200, gin.H{"ok": true, "logs": out})
+}
+
 func (s *Server) viewHome(c *gin.Context) {
 	sources, _ := s.sourceSvc.List()
 	nodes, _ := s.nodes.List()
@@ -268,6 +289,7 @@ func (s *Server) suiRealityQuick(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	v, err := s.sourceSvc.RealityQuick(id, req.Remark)
 	if err == nil {
+		s.audit("reality_quick", "source", strconv.FormatInt(id, 10), req.Remark)
 		_ = s.sourceSvc.Sync(id)
 	}
 	jsonResultKey(c, "obj", v, err)
@@ -281,6 +303,7 @@ func (s *Server) suiInboundRename(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	err := s.sourceSvc.RenameInbound(sid, iid, req.Remark)
 	if err == nil {
+		s.audit("inbound_rename", "inbound", strconv.FormatInt(iid, 10), req.Remark)
 		_ = s.sourceSvc.Sync(sid)
 	}
 	jsonOK(c, err)
@@ -290,6 +313,7 @@ func (s *Server) suiInboundDelete(c *gin.Context) {
 	iid, _ := strconv.ParseInt(c.Param("inboundId"), 10, 64)
 	err := s.sourceSvc.DeleteInbound(sid, iid)
 	if err == nil {
+		s.audit("inbound_delete", "inbound", strconv.FormatInt(iid, 10), "source="+strconv.FormatInt(sid, 10))
 		_ = s.sourceSvc.Sync(sid)
 	}
 	jsonOK(c, err)
