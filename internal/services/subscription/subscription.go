@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/models"
+	"github.com/Spittingjiu/subgo/internal/subconv"
 )
 
 type Service struct{ db *sql.DB }
@@ -117,6 +118,14 @@ func (s *Service) PlainLinks(token, clientIP, ua string) (string, error) {
 	_, _ = s.db.Exec(`UPDATE subscriptions SET access_count=access_count+1,last_accessed_at=? WHERE id=?`, now, sub.ID)
 	_, _ = s.db.Exec(`INSERT INTO subscription_logs(token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at) VALUES(?,?,?,?,?,?,?)`, token, sub.ID, sub.Name, "plain", clientIP, ua, now)
 	return strings.Join(links, "\n") + "\n", nil
+}
+
+func (s *Service) Clash(token, clientIP, ua string) (string, error) {
+	plain, err := s.PlainLinks(token, clientIP, ua)
+	if err != nil {
+		return "", err
+	}
+	return subconv.ClashYAML(subconv.ParseSubscriptionText(plain))
 }
 
 func (s *Service) getByToken(token string) (models.Subscription, error) {

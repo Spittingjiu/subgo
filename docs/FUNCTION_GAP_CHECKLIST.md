@@ -45,17 +45,17 @@
 
 | 源类型 | 旧 Sub 状态 | subgo 状态 | 要求 |
 |---|---:|---:|---|
-| SUI API 源 `sui_api` | ✅ | ⬜ | 支持 token 或账号密码换 token |
-| SBUI/S-Matrix 源 `sbui` | ✅ | ⬜ | 支持 discover + `/api/v1/sub/default` |
-| Cloudflare/raw subscription `cf_sub` | ✅ | ⬜ | HTTP 拉取 + SSRF 防线 |
+| SUI API 源 `sui_api` | ✅ | 🟡 | 初版按订阅 URL 拉取，面板 API 后续增强 |
+| SBUI/S-Matrix 源 `sbui` | ✅ | 🟡 | 支持 `/api/v1/sub/default` 拉取，discover 后续增强 |
+| Cloudflare/raw subscription `cf_sub` | ✅ | ✅ | HTTP 拉取 + SSRF 防线 |
 | 本地节点 `local` | ✅ | ✅ | 已支持手工录入 raw link |
 | localhost 源兼容 | ✅ | ⬜ | 视情况保留 |
 | 源列表 | `GET /api/sources` | 🟡 | 初版支持本地源列表 |
-| 新增源 | `POST /api/sources` | ⬜ | 新系统从零导入 |
-| 修改源 | `PUT /api/sources/:id` | ⬜ | token/地址/名称/启停 |
-| 删除源 | `DELETE /api/sources/:id` | ⬜ | 清关联节点与订阅引用 |
-| 单源同步 | `POST /api/sources/:id/sync` | ⬜ | 必须先做，避免 sync-all 被慢源拖死 |
-| 全量同步 | `POST /api/sources/sync-all` | ⬜ | worker pool 并发，单源失败隔离 |
+| 新增源 | `POST /api/sources` | ✅ | 新系统从零导入 |
+| 修改源 | `PUT /api/sources/:id` | ✅ | token/地址/名称/启停 |
+| 删除源 | `DELETE /api/sources/:id` | ✅ | 清关联节点 |
+| 单源同步 | `POST /api/sources/:id/sync` | ✅ | 已支持，慢源错误写状态 |
+| 全量同步 | `POST /api/sources/sync-all` | 🟡 | 已支持单源失败隔离，并发 worker 后续增强 |
 | 同步失败隐藏节点 | ✅ | ⬜ | 对标旧逻辑：失败源节点不显示/不输出 |
 
 ## 4. 节点管理
@@ -81,8 +81,8 @@
 | 修改订阅 | `PUT /api/subscriptions/:id` | ✅ | 支持重命名、节点范围调整、启停 |
 | 删除订阅 | `DELETE /api/subscriptions/:id` | ✅ | 删除 token |
 | plain 输出 | `/sub/:token`, `/api/sub/:token/plain` | ✅ | 初版 plain 输出可用，streaming writer 后续优化 |
-| Clash/Mihomo 输出 | `/sub/:token/clash` | ⬜ | 强类型生成 YAML |
-| 订阅访问日志 | `GET /api/admin/subscription-logs` | ⬜ | 异步/批量写，避免阻塞拉订阅 |
+| Clash/Mihomo 输出 | `/sub/:token/clash` | 🟡 | 已支持 vless/hy2/ss/trojan 基础 YAML |
+| 订阅访问日志 | `GET /api/admin/subscription-logs` | ✅ | 初版同步写入，异步后续优化 |
 | 自动裁剪不可用节点 | 字段已存在 | ⬜ | 和连通性检测联动 |
 | 模板支持 | clash template URL | ⬜ | 可后置，先保证内置模板 |
 
@@ -90,12 +90,12 @@
 
 | 功能 | 旧 Sub endpoint | subgo 状态 | Go 优势落地 |
 |---|---|---:|---|
-| 内核状态 | `GET /api/kernel/status` | ⬜ | 检测版本/路径 |
+| 内核状态 | `GET /api/kernel/status` | 🟡 | 初版返回 TCP 检测模式，mihomo 安装后续补 |
 | 安装 mihomo | `POST /api/kernel/install` | ⬜ | 下载校验、原子替换 |
 | 卸载 mihomo | `POST /api/kernel/uninstall` | ⬜ | 安全删除指定路径 |
-| 单批检测 | `POST /api/nodes/connectivity/check` | ⬜ | context timeout + worker pool |
-| 检测结果 | `GET /api/nodes/connectivity` | ⬜ | latency/status/error |
-| 手动全量检测 | `POST /api/admin/connectivity/run-now` | ⬜ | 后台任务化 |
+| 单批检测 | `POST /api/nodes/connectivity/check` | ✅ | TCP context timeout + worker pool |
+| 检测结果 | `GET /api/nodes/connectivity` | ✅ | latency/status/error |
+| 手动全量检测 | `POST /api/admin/connectivity/run-now` | ✅ | 初版同步执行 |
 | 自动周期检测 | settings | ⬜ | ticker + 防重入 |
 
 ## 7. 上游面板管理
@@ -113,12 +113,12 @@
 
 | 页面/模块 | 旧 Sub 状态 | subgo 状态 | 要求 |
 |---|---:|---:|---|
-| 登录页 | ✅ | ⬜ | 简洁可用 |
-| 首页统计 | ✅ | ⬜ | 源/节点/订阅/健康概览 |
-| 源管理 | ✅ | ⬜ | 新增、编辑、同步、删除 |
-| 节点管理 | ✅ | ⬜ | 过滤、开关、重命名、本地节点 |
-| 订阅管理 | ✅ | ⬜ | 创建/复制 plain/clash 链接 |
-| 连通性检测 | ✅ | ⬜ | 批量检测、结果展示 |
+| 登录页 | ✅ | ✅ | `/app` 简洁可用 |
+| 首页统计 | ✅ | 🟡 | `/app` 管理台初版 |
+| 源管理 | ✅ | ✅ | 新增、同步、删除已可用，编辑 API 已有 |
+| 节点管理 | ✅ | 🟡 | 开关、重命名、本地节点已可用，过滤后续补 |
+| 订阅管理 | ✅ | ✅ | 创建/复制 plain/clash 链接 |
+| 连通性检测 | ✅ | ✅ | 批量检测、结果展示 |
 | 上游 SUI 管理 | ✅ | ⬜ | inbounds、一键 Reality |
 | 移动端适配 | 部分 | ⬜ | 后台必须手机可用 |
 
@@ -137,12 +137,12 @@
 1. ⬜ 新 schema + migration + repository
 2. ⬜ 登录/session/admin settings
 3. ✅ local node + plain subscription 输出（最快形成闭环）
-4. ⬜ raw/cf_sub source 导入与同步
-5. ⬜ subscription CRUD + Clash/Mihomo 输出
+4. ✅ raw/cf_sub source 导入与同步
+5. 🟡 subscription CRUD + Clash/Mihomo 输出
 6. ⬜ SBUI source adapter
 7. ⬜ SUI source adapter
-8. ⬜ 连通性检测 worker pool
-9. ⬜ 前端管理台补齐
+8. ✅ 连通性检测 worker pool
+9. 🟡 前端管理台补齐
 10. ⬜ panel proxy 与上游管理能力
 11. ⬜ 灰度对比旧 Sub 行为，逐项补齐
 
