@@ -6,7 +6,7 @@
   <title>subgo 订阅分发平台</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
-    :root{--bg:#f5f5f7;--surface:#ffffff;--surface2:#fbfbfd;--text:#111111;--muted:#6e6e73;--line:#d2d2d7;--line2:#e5e5ea;--ok:#1d7f42;--err:#c62828;--accent:#111111;--soft:#f2f2f7;--shadow:0 18px 50px rgba(0,0,0,.08)}
+    :root{--bg:#f5f5f7;--surface:#ffffff;--surface2:#fbfbfd;--text:#111111;--muted:#6e6e73;--line:#d2d2d7;--line2:#e5e5ea;--ok:#1b7a3b;--err:#c62828;--accent:#111111;--soft:#e8e8ed;--shadow:0 18px 50px rgba(0,0,0,.08)}
     *{box-sizing:border-box}
     body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif;margin:0;background:var(--bg);color:var(--text);line-height:1.45;min-height:100dvh;letter-spacing:-.01em}
     body.auth-mode{min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:24px;background:linear-gradient(180deg,#fff,#f5f5f7)}
@@ -50,13 +50,20 @@
     #linkModal .modal-box{width:min(430px,95vw)}
     #linkQr{width:220px;height:220px;border-radius:18px;border:1px solid var(--line2);background:#fff;padding:8px;display:block;margin:8px auto}
     #loginCard{width:min(440px,94vw);padding:28px;border-radius:28px}
-    body.theme-light{--bg:#0b0b0c;--surface:#161617;--surface2:#1d1d1f;--text:#f5f5f7;--muted:#a1a1a6;--line:#3a3a3c;--line2:#2c2c2e;--soft:#242426;--shadow:0 20px 60px rgba(0,0,0,.35)}
+    body.theme-light{--bg:#0b0b0c;--surface:#161617;--surface2:#1d1d1f;--text:#f5f5f7;--muted:#a1a1a6;--line:#3a3a3c;--line2:#2c2c2e;--soft:#2c2c30;--ok:#30d158;--err:#ff453a;--shadow:0 20px 60px rgba(0,0,0,.35)}
+    body.theme-light .pill, body.theme-light .chip{background:var(--soft);color:var(--text);border-color:#3a3a3c}
+    body.theme-light .capsule-toggle{background:var(--soft);color:var(--text);border-color:#3a3a3c}
+    body.theme-light .capsule-toggle-text{color:var(--text)}
+    body.theme-light .src-item{background:#1a1a1d;border-color:#2c2c2e}
     body.theme-light input,body.theme-light select,body.theme-light textarea{background:#1d1d1f;color:#f5f5f7}
     body.theme-light button{background:#f5f5f7;color:#111;border-color:#f5f5f7}
     body.theme-light button[id^="tab"],body.theme-light button.ghost,body.theme-light #themeBtn{background:#161617;color:#f5f5f7;border-color:#3a3a3c}
     body.theme-light .tab-on{background:#f5f5f7!important;color:#111!important;border-color:#f5f5f7!important}
     body.theme-light table,body.theme-light .card,body.theme-light .modal-box{background:#161617}
     body.theme-light th,body.theme-light tr:hover td{background:#1d1d1f}
+    body.theme-light .pill{border-color:#3a3a3c}
+    body.theme-light .chip{background:#2c2c30;color:#e5e5ea;border-color:#3a3a3c}
+    body.theme-light .muted{color:#98989e}
     .capsule-toggle{display:inline-flex;align-items:center;gap:8px;margin-top:8px;padding:7px 11px;border:1px solid var(--line2);border-radius:999px;background:var(--soft);color:var(--text);cursor:pointer;max-width:100%}
     .capsule-toggle input{width:15px;height:15px;flex:0 0 auto}
     .capsule-toggle-text{color:var(--text);font-size:13px;line-height:1.35;white-space:normal;overflow:visible;text-overflow:clip}
