@@ -1,0 +1,11 @@
+/data/
+*.db
+*.db-*
+*.log
+.env
+.env.*
+!/data/.gitkeep
+/bin/
+/dist/
+/tmp/
+.DS_Store
