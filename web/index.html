@@ -660,7 +660,7 @@ function renderNodeSourceSelect(){
 function setNodeSource(v){sourceViewId=String(v);renderNodeSourceSelect();setLocalAddVisible();const nm=q('#nodeMsg'); if(nm) nm.textContent='';loadNodes();}
 function connectivityCell(n){
   const st=String(n.connectivity_status||'unknown');
-  if(st==='ok') return `<span class="ok">可用</span>`;
+  if(st==='ok'){const lat=n.connectivity_latency_ms;return `<span class="ok">${lat!=null?lat+'ms':'通'}</span>`;}
   if(st==='testing') return `<span class="pill">检测中</span>`;
   if(st==='disconnected' || st==='fail') return `<span class="err" title="${esc(n.connectivity_last_error||'')}">不可用</span>`;
   return `<span class="muted">未检测</span>`;

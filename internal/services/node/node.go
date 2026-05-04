@@ -22,7 +22,7 @@ func (s *Service) LocalSourceID() (int64, error) {
 }
 
 func (s *Service) List() ([]models.Node, error) {
-	rows, err := s.db.Query(`SELECT n.id,n.source_id,s.name,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at FROM nodes n JOIN sources s ON s.id=n.source_id WHERE n.enabled IN (0,1) AND s.enabled=1 ORDER BY n.id DESC`)
+	rows, err := s.db.Query(`SELECT n.id,n.source_id,s.name,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.enabled IN (0,1) AND s.enabled=1 ORDER BY n.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func (s *Service) CreateLocal(raw, name string) (models.Node, error) {
 }
 
 func (s *Service) Get(id int64) (models.Node, error) {
-	row := s.db.QueryRow(`SELECT n.id,n.source_id,s.name,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at FROM nodes n JOIN sources s ON s.id=n.source_id WHERE n.id=?`, id)
+	row := s.db.QueryRow(`SELECT n.id,n.source_id,s.name,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.id=?`, id)
 	return scanNode(row)
 }
 func (s *Service) Toggle(id int64, enabled bool) error {
@@ -100,12 +100,23 @@ func scanNode(scanner interface{ Scan(...any) error }) (models.Node, error) {
 	var n models.Node
 	var enabled int
 	var ca, ua string
-	if err := scanner.Scan(&n.ID, &n.SourceID, &n.SourceName, &n.DisplayNo, &n.NodeHash, &n.RawLink, &n.NodeName, &n.Protocol, &enabled, &ca, &ua); err != nil {
+	var connStatus, connErr sql.NullString
+	var connLat sql.NullInt64
+	if err := scanner.Scan(&n.ID, &n.SourceID, &n.SourceName, &n.DisplayNo, &n.NodeHash, &n.RawLink, &n.NodeName, &n.Protocol, &enabled, &ca, &ua, &connStatus, &connLat, &connErr); err != nil {
 		return n, err
 	}
 	n.Enabled = enabled == 1
 	n.CreatedAt, _ = time.Parse(time.RFC3339, ca)
 	n.UpdatedAt, _ = time.Parse(time.RFC3339, ua)
+	if connStatus.Valid {
+		n.ConnectivityStatus = &connStatus.String
+	}
+	if connLat.Valid {
+		n.ConnectivityLatMs = &connLat.Int64
+	}
+	if connErr.Valid {
+		n.ConnectivityError = &connErr.String
+	}
 	return n, nil
 }
 func boolInt(v bool) int {

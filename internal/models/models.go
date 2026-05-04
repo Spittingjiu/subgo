@@ -23,17 +23,20 @@ type Source struct {
 }
 
 type Node struct {
-	ID         int64     `json:"id"`
-	SourceID   int64     `json:"source_id"`
-	SourceName string    `json:"source_name,omitempty"`
-	DisplayNo  string    `json:"display_no"`
-	NodeHash   string    `json:"node_hash"`
-	RawLink    string    `json:"raw_link"`
-	NodeName   string    `json:"node_name"`
-	Protocol   string    `json:"protocol"`
-	Enabled    bool      `json:"enabled"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID                 int64     `json:"id"`
+	SourceID           int64     `json:"source_id"`
+	SourceName         string    `json:"source_name,omitempty"`
+	DisplayNo          string    `json:"display_no"`
+	NodeHash           string    `json:"node_hash"`
+	RawLink            string    `json:"raw_link"`
+	NodeName           string    `json:"node_name"`
+	Protocol           string    `json:"protocol"`
+	Enabled            bool      `json:"enabled"`
+	ConnectivityStatus *string   `json:"connectivity_status,omitempty"`
+	ConnectivityLatMs  *int64    `json:"connectivity_latency_ms,omitempty"`
+	ConnectivityError  *string   `json:"connectivity_last_error,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Subscription struct {
