@@ -67,6 +67,13 @@
     summary{list-style:none} summary::-webkit-details-marker{display:none}
     h1,h2,h3{letter-spacing:-.035em}
     @media (max-width:860px){.grid{grid-template-columns:1fr}.wrap{padding:14px 10px 28px}.card{padding:16px;border-radius:22px}.row{gap:7px}#subs input[readonly]{max-width:100%;min-width:0;width:100%}.chip{max-width:100%}.modal-node-grid{grid-template-columns:1fr}}
+
+    .top-nav{display:flex;gap:6px;align-items:center}
+    .bottom-nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:40;background:var(--surface);border-top:1px solid var(--line2);padding:6px 10px 8px;justify-content:space-around;align-items:center;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+    .bottom-nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 0;border:0;background:transparent;color:var(--muted);font-size:10px;font-weight:550;min-width:48px;line-height:1.2}
+    .bottom-nav button svg, .bottom-nav button i{font-size:20px;font-style:normal;font-weight:700;margin-bottom:1px}
+    .bottom-nav button.bnav-on{color:var(--text)}
+    .bottom-nav button.bnav-on svg,.bottom-nav button.bnav-on i{color:var(--accent)}
   </style>
 </head>
 <body>
@@ -210,6 +217,13 @@
     </div>
   </div>
 
+
+  <div class="bottom-nav" id="bottomNav">
+    <button id="bnHome" onclick="switchTab('home')">🏠<span>控制台</span></button>
+    <button id="bnNodes" onclick="switchTab('nodes')">🔗<span>节点订阅</span></button>
+    <button id="bnSui" onclick="switchTab('sui')">📡<span>上游管理</span></button>
+    <button id="bnUser" onclick="switchTab('user')">⚙<span>用户</span></button>
+  </div>
 
   <div id="subModal" class="modal-mask hide">
     <div class="modal-box">
