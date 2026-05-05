@@ -285,19 +285,20 @@ func (s *Server) viewBootstrap(c *gin.Context) {
 	subEnriched := make([]gin.H, len(subs))
 	for i, sub := range subs {
 		subEnriched[i] = gin.H{
-			"id":               sub.ID,
-			"name":             sub.Name,
-			"token":            sub.Token,
-			"source_ids":       sub.SourceIDs,
-			"node_ids":         sub.NodeIDs,
-			"enabled":          sub.Enabled,
-			"access_count":     sub.AccessCount,
-			"last_accessed_at": sub.LastAccessedAt,
-			"created_at":       sub.CreatedAt,
-			"updated_at":       sub.UpdatedAt,
-			"url":              "/sub/" + sub.Token,
-			"full_url":         base + "/sub/" + sub.Token,
-			"clash_url":        base + "/sub/" + sub.Token + "/clash",
+			"id":                     sub.ID,
+			"name":                   sub.Name,
+			"token":                  sub.Token,
+			"source_ids":             sub.SourceIDs,
+			"node_ids":               sub.NodeIDs,
+			"enabled":                sub.Enabled,
+			"auto_prune_unreachable": sub.AutoPruneUnreachable,
+			"access_count":           sub.AccessCount,
+			"last_accessed_at":       sub.LastAccessedAt,
+			"created_at":             sub.CreatedAt,
+			"updated_at":             sub.UpdatedAt,
+			"url":                    "/sub/" + sub.Token,
+			"full_url":               base + "/sub/" + sub.Token,
+			"clash_url":              base + "/sub/" + sub.Token + "/clash",
 		}
 	}
 	c.JSON(200, gin.H{"ok": true, "sources": sources, "nodes": nodes, "subscriptions": subEnriched})
@@ -405,34 +406,36 @@ func (s *Server) listSubscriptions(c *gin.Context) {
 	out := make([]gin.H, len(v))
 	for i, sub := range v {
 		out[i] = gin.H{
-			"id":               sub.ID,
-			"name":             sub.Name,
-			"token":            sub.Token,
-			"source_ids":       sub.SourceIDs,
-			"node_ids":         sub.NodeIDs,
-			"enabled":          sub.Enabled,
-			"access_count":     sub.AccessCount,
-			"last_accessed_at": sub.LastAccessedAt,
-			"created_at":       sub.CreatedAt,
-			"updated_at":       sub.UpdatedAt,
-			"url":              "/sub/" + sub.Token,
-			"full_url":         base + "/sub/" + sub.Token,
-			"clash_url":        base + "/sub/" + sub.Token + "/clash",
+			"id":                     sub.ID,
+			"name":                   sub.Name,
+			"token":                  sub.Token,
+			"source_ids":             sub.SourceIDs,
+			"node_ids":               sub.NodeIDs,
+			"enabled":                sub.Enabled,
+			"auto_prune_unreachable": sub.AutoPruneUnreachable,
+			"access_count":           sub.AccessCount,
+			"last_accessed_at":       sub.LastAccessedAt,
+			"created_at":             sub.CreatedAt,
+			"updated_at":             sub.UpdatedAt,
+			"url":                    "/sub/" + sub.Token,
+			"full_url":               base + "/sub/" + sub.Token,
+			"clash_url":              base + "/sub/" + sub.Token + "/clash",
 		}
 	}
 	c.JSON(200, gin.H{"ok": true, "subscriptions": out})
 }
 func (s *Server) createSubscription(c *gin.Context) {
 	var req struct {
-		Name      string  `json:"name"`
-		NodeIDs   []int64 `json:"node_ids"`
-		SourceIDs []int64 `json:"source_ids"`
+		Name                 string  `json:"name"`
+		NodeIDs              []int64 `json:"node_ids"`
+		SourceIDs            []int64 `json:"source_ids"`
+		AutoPruneUnreachable bool    `json:"auto_prune_unreachable"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	sub, err := s.subs.Create(req.Name, req.NodeIDs, req.SourceIDs)
+	sub, err := s.subs.Create(req.Name, req.NodeIDs, req.SourceIDs, req.AutoPruneUnreachable)
 	if err == nil {
 		sub.PlainURL = s.publicBase(c) + "/sub/" + sub.Token
 	}
@@ -441,16 +444,17 @@ func (s *Server) createSubscription(c *gin.Context) {
 func (s *Server) updateSubscription(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct {
-		Name      string  `json:"name"`
-		NodeIDs   []int64 `json:"node_ids"`
-		SourceIDs []int64 `json:"source_ids"`
-		Enabled   bool    `json:"enabled"`
+		Name                 string  `json:"name"`
+		NodeIDs              []int64 `json:"node_ids"`
+		SourceIDs            []int64 `json:"source_ids"`
+		Enabled              *bool   `json:"enabled"`
+		AutoPruneUnreachable bool    `json:"auto_prune_unreachable"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	jsonOK(c, s.subs.Update(id, req.Name, req.NodeIDs, req.SourceIDs, req.Enabled))
+	jsonOK(c, s.subs.Update(id, req.Name, req.NodeIDs, req.SourceIDs, req.Enabled, req.AutoPruneUnreachable))
 }
 func (s *Server) deleteSubscription(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)

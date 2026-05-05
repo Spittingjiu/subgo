@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0, viewport-fit=cover"/>
-  <title>subgo 订阅分发平台</title>
+  <title>万象星枢 · subGO</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
     :root{--bg:#f5f5f7;--bg2:#f1f1f4;--surface:#ffffff;--surface2:#fbfbfd;--surface3:#f0f0f3;--text:#111111;--text2:#1d1d1f;--muted:#6e6e73;--line:#d2d2d7;--line2:#e5e5ea;--ok:#1b7a3b;--err:#c62828;--accent:#111111;--soft:#e8e8ed;--shadow:0 18px 50px rgba(0,0,0,.08)}
@@ -31,13 +31,16 @@
     th{color:var(--muted);font-weight:650;background:#fafafa}
     tr:last-child td{border-bottom:0}
     tr:hover td{background:#fafafa}
-    #nodes table{min-width:520px}
-    #nodes th:nth-child(1),#nodes td:nth-child(1){width:46px;padding-right:2px}
-    #nodes th:nth-child(2),#nodes td:nth-child(2){width:82px;padding-left:2px;padding-right:2px}
-    #nodes th:nth-child(3),#nodes td:nth-child(3){padding-left:2px;padding-right:4px;max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    #nodes th:nth-child(4),#nodes td:nth-child(4){width:92px;padding-left:4px;padding-right:4px;white-space:nowrap;text-align:left}
-    #nodes th:nth-child(5),#nodes td:nth-child(5){width:64px;white-space:nowrap}
-    #nodes th:nth-child(6),#nodes td:nth-child(6){width:118px;white-space:nowrap}
+    #nodes table{min-width:560px;table-layout:fixed}
+    #nodes thead,#nodes tbody{display:block;width:100%}
+    #nodes tr{display:grid;grid-template-columns:minmax(38px,.5fr) minmax(58px,.5fr) minmax(120px,3fr) minmax(74px,1fr) minmax(58px,1fr) minmax(112px,2fr);align-items:center;width:100%}
+    #nodes th,#nodes td{min-width:0;width:auto!important;max-width:none!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #nodes th:nth-child(1),#nodes td:nth-child(1){padding-right:4px}
+    #nodes th:nth-child(2),#nodes td:nth-child(2){padding-left:4px;padding-right:4px}
+    #nodes th:nth-child(3),#nodes td:nth-child(3){padding-left:4px;padding-right:8px}
+    #nodes th:nth-child(4),#nodes td:nth-child(4){padding-left:4px;padding-right:6px;text-align:left}
+    #nodes th:nth-child(5),#nodes td:nth-child(5){padding-left:4px;padding-right:6px}
+    #nodes th:nth-child(6),#nodes td:nth-child(6){padding-left:4px;white-space:nowrap}
     .tab-on{background:#111!important;border-color:#111!important;color:#fff!important;box-shadow:none!important}
     .chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 9px;max-width:280px;border-radius:999px;background:var(--soft);color:var(--text);border:1px solid var(--line2);font-size:12px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .sel-list{max-height:240px;overflow:auto;border:1px solid var(--line2);border-radius:18px;padding:8px;margin-top:8px;background:var(--surface2)}
@@ -70,9 +73,12 @@
     body.theme-light .capsule-toggle-text{color:#f8fafc}
     body.theme-light .muted{color:#cbd5e1}
     body.theme-light .ok{color:#4ade80}.theme-light .err{color:#fb7185}
-    body.theme-light .modal-node-item{background:#172033!important;border-color:#475569!important;color:#f8fafc!important}
+    body.theme-light .modal-node-item{background:linear-gradient(180deg,#1e293b,#111827)!important;border:1px solid #64748b!important;color:#f8fafc!important;box-shadow:0 1px 0 rgba(255,255,255,.06),0 10px 24px rgba(0,0,0,.18)}
+    body.theme-light .modal-node-item:has(input:checked){border-color:#93c5fd!important;background:linear-gradient(180deg,#24344f,#172033)!important;box-shadow:0 0 0 2px rgba(147,197,253,.20),0 12px 28px rgba(0,0,0,.25)}
     body.theme-light .modal-node-item div{color:#f8fafc!important}
-    body.theme-light .modal-node-item .muted{color:#cbd5e1!important}
+    body.theme-light .modal-node-title{color:#ffffff!important;text-shadow:0 1px 0 rgba(0,0,0,.28)}
+    body.theme-light .modal-node-meta{color:#dbeafe!important}
+    body.theme-light .modal-node-item input[type="checkbox"]{accent-color:#93c5fd}
     body.theme-light .bottom-nav{background:rgba(18,22,33,.92);border-color:var(--line2)}
     body.theme-light .bottom-nav button{background:transparent;color:#cbd5e1;border-color:transparent}
     body.theme-light .bottom-nav button.bnav-on{color:#f8fafc}
@@ -80,7 +86,10 @@
     .capsule-toggle input{width:15px;height:15px;flex:0 0 auto}
     .capsule-toggle-text{color:var(--text);font-size:13px;line-height:1.35;white-space:normal;overflow:visible;text-overflow:clip}
     .modal-node-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
-    .modal-node-item{background:var(--surface2)!important;border-color:var(--line2)!important;color:var(--text)!important}
+    .modal-node-item{background:linear-gradient(180deg,var(--surface2),var(--surface))!important;border:1px solid var(--line)!important;color:var(--text)!important;box-shadow:0 1px 0 rgba(0,0,0,.04)}
+    .modal-node-item:has(input:checked){border-color:var(--accent)!important;box-shadow:0 0 0 2px rgba(37,99,235,.12);background:linear-gradient(180deg,var(--surface3),var(--surface2))!important}
+    .modal-node-title{color:var(--text);line-height:1.35;white-space:normal;word-break:normal;overflow-wrap:anywhere;font-weight:750}
+    .modal-node-meta{color:var(--muted);font-size:12px;margin-top:2px;white-space:normal;word-break:normal;overflow-wrap:anywhere}
     .log-box{max-height:280px;overflow:auto;border:1px solid var(--line2);border-radius:18px;padding:10px;background:var(--surface2)}
     details{border:1px solid var(--line2)!important;border-radius:18px!important;background:var(--surface2)!important;padding:10px 12px!important}
     summary{list-style:none} summary::-webkit-details-marker{display:none}
@@ -106,7 +115,7 @@
       input,select,textarea,button{max-width:100%}#tab-nodes .card>.row,#tab-home .grid,#tab-sui .row,#tab-user .row{width:100%}
       #nodeSourceSelect{flex:1 1 100%!important;min-width:0!important;max-width:none!important}#kernelBadge{flex:1 1 auto}.btn-small{padding:7px 9px!important;font-size:12px!important}
       #localNodeLink,#localNodeName{flex:1 1 100%!important;min-width:0!important;max-width:none!important}#addLocalBtn{margin-left:0!important;width:100%}
-      table{font-size:12px;min-width:620px}td,th{padding:8px 7px;font-size:12px}#nodes table{min-width:620px}#nodes th:nth-child(3),#nodes td:nth-child(3){max-width:170px}
+      table{font-size:12px;min-width:620px}td,th{padding:8px 7px;font-size:12px}#nodes table{min-width:520px}#nodes tr{grid-template-columns:minmax(34px,.5fr) minmax(52px,.5fr) minmax(104px,2.6fr) minmax(68px,1fr) minmax(52px,.9fr) minmax(104px,1.8fr)}
       #nodes,#suiNodes,#subs,.log-box{overflow-x:auto;-webkit-overflow-scrolling:touch}#nodes{max-height:58vh!important}#subs input[readonly]{max-width:100%;min-width:0;width:100%}.src-item{padding:12px;border-radius:16px}.chip{max-width:100%}
       .modal-mask{align-items:flex-end;padding:10px}.modal-box{width:100%;max-height:88dvh;border-radius:22px 22px 16px 16px;padding:14px}.modal-node-grid{grid-template-columns:1fr}.sel-list{max-height:46dvh}
       #linkModal .modal-box{width:100%}#linkQr{width:200px;height:200px}#loginCard{width:100%;padding:22px;border-radius:24px}
@@ -123,7 +132,7 @@
 </head>
 <body>
   <div id="loginCard" class="card hide">
-    <h2 style="margin:0 0 8px">🔐 登录 subgo 订阅分发平台</h2>
+    <h2 style="margin:0 0 8px">🔐 登录万象星枢</h2>
     <input id="lu" placeholder="用户名" autocomplete="username"/>
     <input id="lp" type="password" placeholder="密码" autocomplete="current-password" style="margin-top:8px"/>
     <button onclick="login()" style="margin-top:8px;width:100%">进入控制台</button>
@@ -132,14 +141,15 @@
 
   <div id="app" class="hide wrap">
     <div class="row" style="justify-content:space-between;align-items:flex-start">
-      <div>
-        <div class="row" style="gap:6px;margin-bottom:8px">
+      <div style="min-width:0">
+        <h1 style="margin:0;font-size:34px;letter-spacing:-.04em">🪐 万象星枢</h1>
+        <div class="muted">subGO 驱动的节点订阅星图</div>
+        <div class="row" style="gap:6px;margin-top:12px;margin-bottom:8px">
           <button id="tabHomeBtn" onclick="switchTab('home')">源</button>
           <button id="tabNodeBtn" onclick="switchTab('nodes')">节点&订阅</button>
           <button id="tabSuiBtn" onclick="switchTab('sui')">上游管理</button>
           <button id="tabUserBtn" onclick="switchTab('user')">用户管理</button>
         </div>
-        <h1 style="margin:0;font-size:34px;letter-spacing:-.04em">🧭 subgo 控制台</h1><div class="muted">Go + sing-box 驱动的订阅编排平台</div>
       </div>
       <div class="row" style="gap:8px">
         <button id="themeBtn" onclick="toggleTheme()">黑色主题</button>
@@ -958,7 +968,7 @@ function renderSubModal(){
   const picked=q('#modalPicked'), list=q('#modalNodeList'), nodes=modalNodes();
   const chosen=modalAllNodes.filter(n=>selectedNodeIds.has(nodeRealId(n)));
   picked.innerHTML=chosen.length?chosen.map(n=>`<span class="chip">${esc(n.node_name||n.display_id||String(n.display_id||n.id).padStart(3,'0'))} <a href="javascript:void(0)" data-rm="${nodeRealId(n)}" style="color:#c9d2ff;text-decoration:none">×</a></span>`).join(''):'<span class="muted">未选择节点</span>';
-  list.innerHTML=nodes.length?`<div class="modal-node-grid">${nodes.map(n=>`<label class="modal-node-item" style="display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border:1px solid #2b3963;border-radius:10px;background:#0d1530;cursor:pointer"><div style="min-width:0"><div style="color:#eef2ff;line-height:1.35;white-space:normal;word-break:normal;overflow-wrap:anywhere">${esc(n.node_name||'')}</div><div style="color:rgba(238,242,255,.72);font-size:12px;margin-top:2px;white-space:normal;word-break:normal;overflow-wrap:anywhere">${esc(n.display_id||String(n.display_id||n.id).padStart(3,'0'))} · ${esc(n.source_name||n.source_id)}</div></div><input type="checkbox" data-nid="${nodeRealId(n)}" ${selectedNodeIds.has(nodeRealId(n))?'checked':''} style="width:18px;height:18px;justify-self:end"></label>`).join('')}</div>`:'<div class="muted">该源暂无节点</div>';
+  list.innerHTML=nodes.length?`<div class="modal-node-grid">${nodes.map(n=>`<label class="modal-node-item" style="display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:10px;cursor:pointer"><div style="min-width:0"><div class="modal-node-title">${esc(n.node_name||'')}</div><div class="modal-node-meta">${esc(n.display_id||String(n.display_id||n.id).padStart(3,'0'))} · ${esc(n.source_name||n.source_id)}</div></div><input type="checkbox" data-nid="${nodeRealId(n)}" ${selectedNodeIds.has(nodeRealId(n))?'checked':''} style="width:18px;height:18px;justify-self:end"></label>`).join('')}</div>`:'<div class="muted">该源暂无节点</div>';
   list.querySelectorAll('input[data-nid]').forEach(el=>el.onchange=(e)=>{const id=Number(e.target.dataset.nid);if(e.target.checked)selectedNodeIds.add(id);else selectedNodeIds.delete(id);renderSubModal();});
   picked.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{selectedNodeIds.delete(Number(el.dataset.rm));renderSubModal();});
 }

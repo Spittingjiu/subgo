@@ -40,19 +40,20 @@ type Node struct {
 }
 
 type Subscription struct {
-	ID             int64      `json:"id"`
-	Name           string     `json:"name"`
-	Token          string     `json:"token"`
-	SourceIDsJSON  string     `json:"-"`
-	NodeIDsJSON    string     `json:"-"`
-	SourceIDs      []int64    `json:"source_ids"`
-	NodeIDs        []int64    `json:"node_ids"`
-	Enabled        bool       `json:"enabled"`
-	AccessCount    int64      `json:"access_count"`
-	LastAccessedAt *time.Time `json:"last_accessed_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	PlainURL       string     `json:"plain_url,omitempty"`
+	ID                   int64      `json:"id"`
+	Name                 string     `json:"name"`
+	Token                string     `json:"token"`
+	SourceIDsJSON        string     `json:"-"`
+	NodeIDsJSON          string     `json:"-"`
+	SourceIDs            []int64    `json:"source_ids"`
+	NodeIDs              []int64    `json:"node_ids"`
+	Enabled              bool       `json:"enabled"`
+	AutoPruneUnreachable bool       `json:"auto_prune_unreachable"`
+	AccessCount          int64      `json:"access_count"`
+	LastAccessedAt       *time.Time `json:"last_accessed_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	PlainURL             string     `json:"plain_url,omitempty"`
 }
 
 type SubscriptionLog struct {

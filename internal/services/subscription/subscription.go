@@ -18,7 +18,7 @@ type Service struct{ db *sql.DB }
 func New(db *sql.DB) *Service { return &Service{db: db} }
 
 func (s *Service) List(base string) ([]models.Subscription, error) {
-	rows, err := s.db.Query(`SELECT id,name,token,source_ids_json,node_ids_json,enabled,access_count,last_accessed_at,created_at,updated_at FROM subscriptions ORDER BY id DESC`)
+	rows, err := s.db.Query(`SELECT id,name,token,source_ids_json,node_ids_json,enabled,auto_prune_unreachable,access_count,last_accessed_at,created_at,updated_at FROM subscriptions ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func (s *Service) List(base string) ([]models.Subscription, error) {
 	}
 	return out, rows.Err()
 }
-func (s *Service) Create(name string, nodeIDs, sourceIDs []int64) (models.Subscription, error) {
+func (s *Service) Create(name string, nodeIDs, sourceIDs []int64, autoPruneUnreachable bool) (models.Subscription, error) {
 	if strings.TrimSpace(name) == "" {
 		name = "默认订阅"
 	}
@@ -41,7 +41,7 @@ func (s *Service) Create(name string, nodeIDs, sourceIDs []int64) (models.Subscr
 	now := time.Now().UTC().Format(time.RFC3339)
 	nj, _ := json.Marshal(nodeIDs)
 	sj, _ := json.Marshal(sourceIDs)
-	res, err := s.db.Exec(`INSERT INTO subscriptions(name,token,source_ids_json,node_ids_json,enabled,created_at,updated_at) VALUES(?,?,?,?,1,?,?)`, name, token, string(sj), string(nj), now, now)
+	res, err := s.db.Exec(`INSERT INTO subscriptions(name,token,source_ids_json,node_ids_json,enabled,auto_prune_unreachable,created_at,updated_at) VALUES(?,?,?,?,1,?,?,?)`, name, token, string(sj), string(nj), boolInt(autoPruneUnreachable), now, now)
 	if err != nil {
 		return models.Subscription{}, err
 	}
@@ -59,16 +59,20 @@ func (s *Service) Create(name string, nodeIDs, sourceIDs []int64) (models.Subscr
 	return sub, nil
 }
 func (s *Service) Get(id int64, base string) (models.Subscription, error) {
-	row := s.db.QueryRow(`SELECT id,name,token,source_ids_json,node_ids_json,enabled,access_count,last_accessed_at,created_at,updated_at FROM subscriptions WHERE id=?`, id)
+	row := s.db.QueryRow(`SELECT id,name,token,source_ids_json,node_ids_json,enabled,auto_prune_unreachable,access_count,last_accessed_at,created_at,updated_at FROM subscriptions WHERE id=?`, id)
 	return scanSub(row, base)
 }
-func (s *Service) Update(id int64, name string, nodeIDs, sourceIDs []int64, enabled bool) error {
+func (s *Service) Update(id int64, name string, nodeIDs, sourceIDs []int64, enabled *bool, autoPruneUnreachable bool) error {
 	if strings.TrimSpace(name) == "" {
 		return errors.New("name required")
 	}
 	nj, _ := json.Marshal(nodeIDs)
 	sj, _ := json.Marshal(sourceIDs)
-	_, err := s.db.Exec(`UPDATE subscriptions SET name=?,source_ids_json=?,node_ids_json=?,enabled=?,updated_at=? WHERE id=?`, name, string(sj), string(nj), boolInt(enabled), time.Now().UTC().Format(time.RFC3339), id)
+	enabledVal := -1
+	if enabled != nil {
+		enabledVal = boolInt(*enabled)
+	}
+	_, err := s.db.Exec(`UPDATE subscriptions SET name=?,source_ids_json=?,node_ids_json=?,enabled=CASE WHEN ?=-1 THEN enabled ELSE ? END,auto_prune_unreachable=?,updated_at=? WHERE id=?`, name, string(sj), string(nj), enabledVal, enabledVal, boolInt(autoPruneUnreachable), time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 func (s *Service) Delete(id int64) error {
@@ -86,6 +90,9 @@ func (s *Service) PlainLinks(token, clientIP, ua string) (string, error) {
 	}
 	q := `SELECT n.raw_link FROM nodes n JOIN sources s ON s.id=n.source_id WHERE n.enabled=1 AND s.enabled=1`
 	args := []any{}
+	if sub.AutoPruneUnreachable {
+		q += ` AND NOT EXISTS (SELECT 1 FROM node_connectivity nc WHERE nc.node_id=n.id AND nc.status='fail')`
+	}
 	if len(sub.NodeIDs) > 0 {
 		q += ` AND n.id IN (` + placeholders(len(sub.NodeIDs)) + `)`
 		for _, id := range sub.NodeIDs {
@@ -132,18 +139,20 @@ func (s *Service) Clash(token, clientIP, ua string, clashTemplate []byte) (strin
 }
 
 func (s *Service) getByToken(token string) (models.Subscription, error) {
-	row := s.db.QueryRow(`SELECT id,name,token,source_ids_json,node_ids_json,enabled,access_count,last_accessed_at,created_at,updated_at FROM subscriptions WHERE token=?`, token)
+	row := s.db.QueryRow(`SELECT id,name,token,source_ids_json,node_ids_json,enabled,auto_prune_unreachable,access_count,last_accessed_at,created_at,updated_at FROM subscriptions WHERE token=?`, token)
 	return scanSub(row, "")
 }
 func scanSub(scanner interface{ Scan(...any) error }, base string) (models.Subscription, error) {
 	var sub models.Subscription
 	var enabled int
+	var autoPrune int
 	var la sql.NullString
 	var ca, ua string
-	if err := scanner.Scan(&sub.ID, &sub.Name, &sub.Token, &sub.SourceIDsJSON, &sub.NodeIDsJSON, &enabled, &sub.AccessCount, &la, &ca, &ua); err != nil {
+	if err := scanner.Scan(&sub.ID, &sub.Name, &sub.Token, &sub.SourceIDsJSON, &sub.NodeIDsJSON, &enabled, &autoPrune, &sub.AccessCount, &la, &ca, &ua); err != nil {
 		return sub, err
 	}
 	sub.Enabled = enabled == 1
+	sub.AutoPruneUnreachable = autoPrune == 1
 	_ = json.Unmarshal([]byte(sub.SourceIDsJSON), &sub.SourceIDs)
 	_ = json.Unmarshal([]byte(sub.NodeIDsJSON), &sub.NodeIDs)
 	if sub.SourceIDs == nil {

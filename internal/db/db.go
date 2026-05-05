@@ -22,7 +22,8 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	d.SetMaxOpenConns(1)
+	d.SetMaxOpenConns(4)
+	d.SetMaxIdleConns(4)
 	wrapped := &DB{DB: d}
 	if err := wrapped.Migrate(); err != nil {
 		_ = d.Close()
@@ -51,7 +52,37 @@ func (d *DB) Migrate() error {
 			return fmt.Errorf("migrate: %w sql=%s", err, s)
 		}
 	}
+	if err := d.addColumnIfMissing("subscriptions", "auto_prune_unreachable", `ALTER TABLE subscriptions ADD COLUMN auto_prune_unreachable INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	return d.ensureDefaults()
+}
+
+func (d *DB) addColumnIfMissing(table, column, stmt string) error {
+	rows, err := d.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := d.Exec(stmt); err != nil {
+		return fmt.Errorf("migrate add column %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 func (d *DB) ensureDefaults() error {
