@@ -19,6 +19,7 @@
     button{cursor:pointer;white-space:nowrap;transition:.18s transform,.18s background,.18s border-color;background:#111;color:#fff;font-weight:650;border:1px solid #111}
     button:hover{transform:translateY(-1px);background:#000}
     button:active{transform:translateY(0)}
+    .btn-small{padding:7px 10px!important;border-radius:11px!important;font-size:12px!important;line-height:1.1!important}
     button[id^="tab"],button.ghost,#themeBtn{background:var(--surface);color:var(--text);border:1px solid var(--line);box-shadow:none}
     .grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:12px}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -36,7 +37,7 @@
     #nodes th:nth-child(3),#nodes td:nth-child(3){padding-left:2px;padding-right:4px;max-width:210px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     #nodes th:nth-child(4),#nodes td:nth-child(4){width:92px;padding-left:4px;padding-right:4px;white-space:nowrap;text-align:left}
     #nodes th:nth-child(5),#nodes td:nth-child(5){width:64px;white-space:nowrap}
-    #nodes th:nth-child(6),#nodes td:nth-child(6){width:170px;white-space:nowrap}
+    #nodes th:nth-child(6),#nodes td:nth-child(6){width:118px;white-space:nowrap}
     .tab-on{background:#111!important;border-color:#111!important;color:#fff!important;box-shadow:none!important}
     .chips{display:flex;gap:6px;flex-wrap:wrap}.chip{padding:4px 9px;max-width:280px;border-radius:999px;background:var(--soft);color:var(--text);border:1px solid var(--line2);font-size:12px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .sel-list{max-height:240px;overflow:auto;border:1px solid var(--line2);border-radius:18px;padding:8px;margin-top:8px;background:var(--surface2)}
@@ -174,7 +175,8 @@
         <div class="row" style="margin-top:6px">
           <select id="nodeSourceSelect" style="min-width:150px;max-width:190px" onchange="setNodeSource(this.value)"></select>
           <span id="kernelBadge" class="pill">sing-box 内核：检测中…</span>
-          <button id="kernelToggleBtn" onclick="toggleKernelInstall()">加载中…</button>
+          <button id="kernelToggleBtn" class="btn-small" onclick="toggleKernelInstall()">加载中…</button>
+          <button class="btn-small" onclick="syncAllNodes()">同步节点</button>
           <input id="localNodeLink" placeholder="粘贴节点链接" style="min-width:320px;max-width:640px;flex:1 1 520px"/>
           <input id="localNodeName" placeholder="备注(可选)" style="min-width:86px;max-width:120px;flex:0 0 110px"/>
           <button id="addLocalBtn" onclick="addLocalNode()" style="margin-left:auto">添加本地节点</button>
@@ -679,7 +681,7 @@ function connectivityCell(n){
 function renderNodes(){
   const rows=(allNodes||[]).filter(n=>passCfFilter(n)), box=q('#nodes');
   if(!rows.length){box.innerHTML='<div class="muted">该源暂无节点（或被筛选条件过滤）</div>';return;}
-  box.innerHTML=`<table><thead><tr><th>ID</th><th>来源</th><th>节点名</th><th><button onclick="checkConnectivity()" title="点击检测当前列表连通性" style="padding:4px 8px">连通性</button></th><th>状态</th><th>操作 <button onclick="syncAllNodes()" title="同步所有源并刷新节点列表" style="padding:4px 8px;margin-left:6px">同步节点</button></th></tr></thead><tbody>${rows.map(n=>{
+  box.innerHTML=`<table><thead><tr><th>ID</th><th>来源</th><th>节点名</th><th><button onclick="checkConnectivity()" title="点击检测当前列表连通性" style="padding:4px 8px">连通性</button></th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(n=>{
     const id=nodeRealId(n);
     const isLocal=String(n.source_type||'sui_api')==='local';
     const op=isLocal
