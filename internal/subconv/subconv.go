@@ -198,9 +198,6 @@ func clashProxy(raw string, idx int) map[string]any {
 	if host == "" || port == 0 {
 		return nil
 	}
-	if host == "" || port == 0 {
-		return nil
-	}
 	var q url.Values
 	if err == nil {
 		q = u.Query()
@@ -251,10 +248,13 @@ func clashProxy(raw string, idx int) map[string]any {
 			m["xhttp-opts"] = xopts
 		}
 		if security == "reality" || q.Get("pbk") != "" {
-			ro := map[string]any{}
-			if q.Get("pbk") != "" {
-				ro["public-key"] = q.Get("pbk")
+			pbk := strings.TrimSpace(q.Get("pbk"))
+			// Mihomo rejects reality proxies without public-key. Drop malformed links
+			// instead of letting one bad upstream node break the whole Clash config.
+			if pbk == "" {
+				return nil
 			}
+			ro := map[string]any{"public-key": pbk}
 			if q.Get("sid") != "" {
 				ro["short-id"] = q.Get("sid")
 			}
