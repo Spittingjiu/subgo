@@ -54,7 +54,7 @@ func New(db *sql.DB) *Service {
 	return &Service{db: db, client: &http.Client{Timeout: 12 * time.Second}}
 }
 func (s *Service) List() ([]Source, error) {
-	rows, err := s.db.Query(`SELECT s.id,s.name,s.source_type,s.panel_url,s.panel_token,s.enabled,s.last_sync_at,s.last_sync_status,s.created_at,s.updated_at, COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=s.id),0) as node_count FROM sources s ORDER BY s.id ASC`)
+	rows, err := s.db.Query(`SELECT s.id,s.name,s.source_type,s.panel_url,s.panel_token,s.enabled,s.last_sync_at,s.last_sync_status,s.created_at,s.updated_at,COALESCE(s.sui_flavor,''), COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=s.id),0) as node_count FROM sources s ORDER BY s.id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -64,11 +64,13 @@ func (s *Service) List() ([]Source, error) {
 		var x Source
 		var en int
 		var l sql.NullString
-		if err := rows.Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.NodeCount); err != nil {
+		if err := rows.Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.SUIFlavor, &x.NodeCount); err != nil {
 			return nil, err
 		}
 		x.Enabled = en == 1
-		x.SUIFlavor = s.detectSuiFlavor(x)
+		if x.SUIFlavor == "" && x.Type == "sui_api" {
+			x.SUIFlavor = "unknown"
+		}
 		if l.Valid {
 			v := l.String
 			x.LastSyncAt = &v
@@ -110,9 +112,11 @@ func (s *Service) Get(id int64) (Source, error) {
 	var x Source
 	var en int
 	var l sql.NullString
-	err := s.db.QueryRow(`SELECT id,name,source_type,panel_url,panel_token,enabled,last_sync_at,last_sync_status,created_at,updated_at, COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=sources.id),0) as node_count FROM sources WHERE id=?`, id).Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.NodeCount)
+	err := s.db.QueryRow(`SELECT id,name,source_type,panel_url,panel_token,enabled,last_sync_at,last_sync_status,created_at,updated_at,COALESCE(sui_flavor,''), COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=sources.id),0) as node_count FROM sources WHERE id=?`, id).Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.SUIFlavor, &x.NodeCount)
 	x.Enabled = en == 1
-	x.SUIFlavor = s.detectSuiFlavor(x)
+	if x.SUIFlavor == "" && x.Type == "sui_api" {
+		x.SUIFlavor = "unknown"
+	}
 	if l.Valid {
 		v := l.String
 		x.LastSyncAt = &v
@@ -222,8 +226,17 @@ func (s *Service) Sync(id int64) error {
 	} else {
 		status = fmt.Sprintf("ok (%d nodes)", len(links))
 	}
+	flavor := src.SUIFlavor
+	if src.Type == "sui_api" {
+		f := s.detectSuiFlavor(src)
+		if f == "go" || f == "node" {
+			flavor = f
+		} else if flavor == "" {
+			flavor = "unknown"
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = s.db.Exec(`UPDATE sources SET last_sync_at=?,last_sync_status=?,updated_at=? WHERE id=?`, now, status, now, id)
+	_, _ = s.db.Exec(`UPDATE sources SET last_sync_at=?,last_sync_status=?,sui_flavor=?,updated_at=? WHERE id=?`, now, status, flavor, now, id)
 	if err != nil {
 		return err
 	}

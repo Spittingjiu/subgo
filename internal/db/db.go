@@ -57,6 +57,9 @@ func (d *DB) Migrate() error {
 	if err := d.addColumnIfMissing("subscriptions", "auto_prune_unreachable", `ALTER TABLE subscriptions ADD COLUMN auto_prune_unreachable INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := d.addColumnIfMissing("sources", "sui_flavor", `ALTER TABLE sources ADD COLUMN sui_flavor TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	return d.ensureDefaults()
 }
 
