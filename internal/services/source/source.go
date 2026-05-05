@@ -232,6 +232,7 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
+	seen := make(map[string]struct{})
 	for _, raw := range links {
 		// Skip non-link garbage (HTML/JS/etc)
 		if !strings.Contains(raw, "://") || len(raw) > 2000 {
@@ -239,6 +240,7 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 		}
 		p := subconv.ParseRawLink(raw)
 		h := subconv.StableHash(raw)
+		seen[h] = struct{}{}
 		var exists int64
 		_ = tx.QueryRow(`SELECT id FROM nodes WHERE node_hash=?`, h).Scan(&exists)
 		if exists > 0 {
@@ -250,6 +252,34 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 			_, err = tx.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)`, sourceID, disp, h, raw, p.Name, p.Protocol, now, now)
 		}
 		if err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query(`SELECT id,node_hash FROM nodes WHERE source_id=?`, sourceID)
+	if err != nil {
+		return err
+	}
+	type staleNode struct {
+		id   int64
+		hash string
+	}
+	var stale []staleNode
+	for rows.Next() {
+		var id int64
+		var h string
+		if err := rows.Scan(&id, &h); err != nil {
+			rows.Close()
+			return err
+		}
+		if _, ok := seen[h]; !ok {
+			stale = append(stale, staleNode{id: id, hash: h})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, n := range stale {
+		if _, err := tx.Exec(`DELETE FROM nodes WHERE id=? AND source_id=?`, n.id, sourceID); err != nil {
 			return err
 		}
 	}
