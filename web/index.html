@@ -85,6 +85,17 @@
     details{border:1px solid var(--line2)!important;border-radius:18px!important;background:var(--surface2)!important;padding:10px 12px!important}
     summary{list-style:none} summary::-webkit-details-marker{display:none}
     h1,h2,h3{letter-spacing:-.035em}
+
+    body.auth-mode.theme-light{background:radial-gradient(circle at 20% 12%,rgba(59,130,246,.24),transparent 34%),radial-gradient(circle at 82% 18%,rgba(168,85,247,.20),transparent 30%),linear-gradient(135deg,#020617 0%,#0f172a 48%,#111827 100%)}
+    body.auth-mode.theme-light #loginCard{background:linear-gradient(180deg,rgba(18,22,33,.96),rgba(15,23,42,.94));border:1px solid rgba(148,163,184,.24);box-shadow:0 28px 90px rgba(0,0,0,.58),inset 0 1px 0 rgba(255,255,255,.06);color:#f8fafc}
+    body.auth-mode.theme-light #loginCard h2{font-size:26px;line-height:1.18;margin-bottom:18px!important;color:#f8fafc;text-align:center}
+    body.auth-mode.theme-light #loginCard h2::after{content:'安全登录 · 订阅编排';display:block;margin-top:8px;font-size:13px;font-weight:500;letter-spacing:.02em;color:#cbd5e1}
+    body.auth-mode.theme-light #loginCard input{background:#020617;color:#f8fafc;border-color:#334155;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+    body.auth-mode.theme-light #loginCard input:focus{border-color:#93c5fd;box-shadow:0 0 0 4px rgba(147,197,253,.14)}
+    body.auth-mode.theme-light #loginCard input::placeholder{color:#94a3b8}
+    body.auth-mode.theme-light #loginCard button{background:linear-gradient(135deg,#e0f2fe,#c7d2fe);color:#020617;border:0;box-shadow:0 12px 28px rgba(59,130,246,.22)}
+    body.auth-mode.theme-light #loginCard button:hover{background:linear-gradient(135deg,#f0f9ff,#ddd6fe);color:#020617}
+    body.auth-mode.theme-light #lmsg{color:#fecaca;text-align:center}
     @media (max-width:860px){.grid{grid-template-columns:1fr}.wrap{padding:14px 10px 90px 10px}.card{padding:16px;border-radius:22px}.row{gap:7px}#subs input[readonly]{max-width:100%;min-width:0;width:100%}.chip{max-width:100%}.modal-node-grid{grid-template-columns:1fr}#header{display:none}.top-nav{display:none}.bottom-nav{display:flex}}
 
     .top-nav{display:flex;gap:6px;align-items:center}
