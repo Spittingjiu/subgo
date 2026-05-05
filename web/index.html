@@ -164,8 +164,6 @@
           <select id="nodeSourceSelect" style="min-width:150px;max-width:190px" onchange="setNodeSource(this.value)"></select>
           <span id="kernelBadge" class="pill">sing-box 内核：检测中…</span>
           <button id="kernelToggleBtn" onclick="toggleKernelInstall()">加载中…</button>
-          <button onclick="syncCurrentSource()">同步当前源</button>
-          <button onclick="syncAllSourcesNow()">同步全部源</button>
           <input id="localNodeLink" placeholder="粘贴节点链接" style="min-width:320px;max-width:640px;flex:1 1 520px"/>
           <input id="localNodeName" placeholder="备注(可选)" style="min-width:86px;max-width:120px;flex:0 0 110px"/>
           <button id="addLocalBtn" onclick="addLocalNode()" style="margin-left:auto">添加本地节点</button>
@@ -670,7 +668,7 @@ function connectivityCell(n){
 function renderNodes(){
   const rows=(allNodes||[]).filter(n=>passCfFilter(n)), box=q('#nodes');
   if(!rows.length){box.innerHTML='<div class="muted">该源暂无节点（或被筛选条件过滤）</div>';return;}
-  box.innerHTML=`<table><thead><tr><th>ID</th><th>来源</th><th>节点名</th><th><button onclick="checkConnectivity()" title="点击检测当前列表连通性" style="padding:4px 8px">连通性</button></th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(n=>{
+  box.innerHTML=`<table><thead><tr><th>ID</th><th>来源</th><th>节点名</th><th><button onclick="checkConnectivity()" title="点击检测当前列表连通性" style="padding:4px 8px">连通性</button></th><th>状态</th><th>操作 <button onclick="syncAllNodes()" title="同步所有源并刷新节点列表" style="padding:4px 8px;margin-left:6px">同步节点</button></th></tr></thead><tbody>${rows.map(n=>{
     const id=nodeRealId(n);
     const isLocal=String(n.source_type||'sui_api')==='local';
     const op=isLocal
@@ -698,34 +696,16 @@ async function checkConnectivity(){
 }
 
 let syncingNodes=false;
-async function syncCurrentSource(){
-  if(syncingNodes) return;
-  const nm=q('#nodeMsg');
-  const sourceId=(sourceViewId==='all'?0:Number(sourceViewId)||0);
-  try{
-    syncingNodes=true;
-    if(nm){nm.textContent=sourceId?'正在同步当前源…':'当前为全部源，正在同步全部源…';nm.className='muted';}
-    if(sourceId) await api(`/api/sources/${sourceId}/sync`,{method:'POST'});
-    else await api('/api/sources/sync-all',{method:'POST'});
-    await refreshAll();
-    await loadNodes();
-    if(nm){nm.textContent='同步完成，节点列表已刷新';nm.className='muted';setTimeout(()=>{if(nm)nm.textContent='';},3000);}
-  }catch(e){
-    if(nm){nm.className='err';nm.textContent=e.message;}
-  }finally{
-    syncingNodes=false;
-  }
-}
-async function syncAllSourcesNow(){
+async function syncAllNodes(){
   if(syncingNodes) return;
   const nm=q('#nodeMsg');
   try{
     syncingNodes=true;
-    if(nm){nm.textContent='正在同步全部源…';nm.className='muted';}
+    if(nm){nm.textContent='正在同步节点…';nm.className='muted';}
     await api('/api/sources/sync-all',{method:'POST'});
     await refreshAll();
     await loadNodes();
-    if(nm){nm.textContent='全部源同步完成，节点列表已刷新';nm.className='muted';setTimeout(()=>{if(nm)nm.textContent='';},3000);}
+    if(nm){nm.textContent='节点同步完成，列表已刷新';nm.className='muted';setTimeout(()=>{if(nm)nm.textContent='';},3000);}
   }catch(e){
     if(nm){nm.className='err';nm.textContent=e.message;}
   }finally{
@@ -944,12 +924,14 @@ function renderSubModal(){
   picked.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{selectedNodeIds.delete(Number(el.dataset.rm));renderSubModal();});
 }
 async function openSubModal(sub=null){
+  try{
   editingSubId=sub?.id||null;
   q('#subModalTitle').textContent=sub?'编辑订阅':'新建订阅';
   q('#modalSubName').value=sub?.name||'';
   if(q('#modalAutoPrune')) q('#modalAutoPrune').checked=Number(sub?.auto_prune_unreachable||0)===1;
   selectedNodeIds.clear();
-  (sub?.node_ids||[]).forEach(id=>selectedNodeIds.add(Number(id)));
+  const rawNodeIds=Array.isArray(sub?.node_ids)?sub.node_ids:[];
+  rawNodeIds.forEach(id=>selectedNodeIds.add(Number(id)));
 
   // 切换到编辑某个订阅时，恢复该订阅自己的筛选状态，避免沿用上一个订阅/页面的 draft
   const key=String(editingSubId||'new');
@@ -969,6 +951,7 @@ async function openSubModal(sub=null){
   modalAllNodes=(j.nodes||[]).map(normalizeNodeView);
   renderSubModal();
   q('#subModal').classList.remove('hide');
+  }catch(e){toast('打开订阅编辑失败：'+(e?.message||e),'err');console.error(e);}
 }
 function closeSubModal(){q('#subModal').classList.add('hide')}
 async function saveSubModal(){
