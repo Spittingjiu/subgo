@@ -199,7 +199,12 @@ func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
 	if !strings.Contains(u, "/api/v1/sub/") {
 		u = strings.TrimRight(u, "/") + "/api/v1/sub/default"
 	}
-	return s.fetchSubURL(u, src.PanelToken)
+	token := src.PanelToken
+	if isUserPassToken(token) {
+		// SBUI default subscription is public; credentials are for management APIs.
+		token = ""
+	}
+	return s.fetchSubURL(u, token)
 }
 func (s *Service) fetchSubURL(raw, token string) ([]string, error) {
 	if err := AssertURLSafe(raw); err != nil {
@@ -371,6 +376,13 @@ func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[strin
 		return nil, err
 	}
 	token := src.PanelToken
+	if isUserPassToken(token) {
+		var err error
+		token, err = s.sbuiLogin(base, token)
+		if err != nil {
+			return nil, err
+		}
+	}
 	h := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}
 	if token != "" {
 		h["authorization"] = "Bearer " + token
@@ -379,6 +391,26 @@ func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[strin
 		h["content-type"] = "application/json"
 	}
 	return s.JSONRequest(base+path, method, h, body)
+}
+
+func isUserPassToken(token string) bool {
+	return strings.Contains(token, ":") && !strings.Contains(token, ".")
+}
+
+func (s *Service) sbuiLogin(base, userPass string) (string, error) {
+	parts := strings.SplitN(userPass, ":", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+		return "", errors.New("invalid SBUI credential, expected username:password")
+	}
+	j, err := s.JSONRequest(strings.TrimRight(base, "/")+"/api/v1/login", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(fmt.Sprint(firstVal(j, "token", "access_token")))
+	if token == "" || token == "<nil>" {
+		return "", errors.New("SBUI login did not return token")
+	}
+	return token, nil
 }
 func (s *Service) JSONRequest(raw, method string, headers map[string]string, body any) (map[string]any, error) {
 	if err := AssertURLSafe(raw); err != nil {
