@@ -164,6 +164,8 @@
           <select id="nodeSourceSelect" style="min-width:150px;max-width:190px" onchange="setNodeSource(this.value)"></select>
           <span id="kernelBadge" class="pill">sing-box 内核：检测中…</span>
           <button id="kernelToggleBtn" onclick="toggleKernelInstall()">加载中…</button>
+          <button onclick="syncCurrentSource()">同步当前源</button>
+          <button onclick="syncAllSourcesNow()">同步全部源</button>
           <input id="localNodeLink" placeholder="粘贴节点链接" style="min-width:320px;max-width:640px;flex:1 1 520px"/>
           <input id="localNodeName" placeholder="备注(可选)" style="min-width:86px;max-width:120px;flex:0 0 110px"/>
           <button id="addLocalBtn" onclick="addLocalNode()" style="margin-left:auto">添加本地节点</button>
@@ -692,6 +694,42 @@ async function checkConnectivity(){
     if(nm){nm.className='err'; nm.textContent=e.message;}
   }finally{
     checkingConnectivity=false;
+  }
+}
+
+let syncingNodes=false;
+async function syncCurrentSource(){
+  if(syncingNodes) return;
+  const nm=q('#nodeMsg');
+  const sourceId=(sourceViewId==='all'?0:Number(sourceViewId)||0);
+  try{
+    syncingNodes=true;
+    if(nm){nm.textContent=sourceId?'正在同步当前源…':'当前为全部源，正在同步全部源…';nm.className='muted';}
+    if(sourceId) await api(`/api/sources/${sourceId}/sync`,{method:'POST'});
+    else await api('/api/sources/sync-all',{method:'POST'});
+    await refreshAll();
+    await loadNodes();
+    if(nm){nm.textContent='同步完成，节点列表已刷新';nm.className='muted';setTimeout(()=>{if(nm)nm.textContent='';},3000);}
+  }catch(e){
+    if(nm){nm.className='err';nm.textContent=e.message;}
+  }finally{
+    syncingNodes=false;
+  }
+}
+async function syncAllSourcesNow(){
+  if(syncingNodes) return;
+  const nm=q('#nodeMsg');
+  try{
+    syncingNodes=true;
+    if(nm){nm.textContent='正在同步全部源…';nm.className='muted';}
+    await api('/api/sources/sync-all',{method:'POST'});
+    await refreshAll();
+    await loadNodes();
+    if(nm){nm.textContent='全部源同步完成，节点列表已刷新';nm.className='muted';setTimeout(()=>{if(nm)nm.textContent='';},3000);}
+  }catch(e){
+    if(nm){nm.className='err';nm.textContent=e.message;}
+  }finally{
+    syncingNodes=false;
   }
 }
 async function toggleNode(id){await api('/api/nodes/'+id+'/toggle',{method:'POST'});await loadNodes();}
