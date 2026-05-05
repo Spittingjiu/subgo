@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +38,7 @@ type Source struct {
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	NodeCount      int     `json:"node_count"`
+	SUIFlavor      string  `json:"sui_flavor,omitempty"`
 }
 type Inbound struct {
 	ID        int64  `json:"id"`
@@ -64,6 +68,7 @@ func (s *Service) List() ([]Source, error) {
 			return nil, err
 		}
 		x.Enabled = en == 1
+		x.SUIFlavor = s.detectSuiFlavor(x)
 		if l.Valid {
 			v := l.String
 			x.LastSyncAt = &v
@@ -72,18 +77,68 @@ func (s *Service) List() ([]Source, error) {
 	}
 	return out, rows.Err()
 }
+func (s *Service) detectSuiFlavor(src Source) string {
+	if src.Type != "sui_api" || strings.TrimSpace(src.PanelURL) == "" {
+		return ""
+	}
+	base := strings.TrimRight(src.PanelURL, "/")
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", base+"/auth/me", nil)
+	if err != nil {
+		return "unknown"
+	}
+	if src.PanelToken != "" {
+		req.Header.Set("x-panel-token", src.PanelToken)
+		req.Header.Set("Authorization", "Bearer "+src.PanelToken)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "unknown"
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var j map[string]any
+	_ = json.Unmarshal(b, &j)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && fmt.Sprint(j["success"]) == "true" && (j["user"] != nil || j["panelPath"] != nil) {
+		return "go"
+	}
+	return "node"
+}
+
 func (s *Service) Get(id int64) (Source, error) {
 	var x Source
 	var en int
 	var l sql.NullString
 	err := s.db.QueryRow(`SELECT id,name,source_type,panel_url,panel_token,enabled,last_sync_at,last_sync_status,created_at,updated_at, COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=sources.id),0) as node_count FROM sources WHERE id=?`, id).Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.NodeCount)
 	x.Enabled = en == 1
+	x.SUIFlavor = s.detectSuiFlavor(x)
 	if l.Valid {
 		v := l.String
 		x.LastSyncAt = &v
 	}
 	return x, err
 }
+func (s *Service) ExchangeCredentialToken(typ, panelURL, token string) (string, error) {
+	typ = strings.TrimSpace(typ)
+	token = strings.TrimSpace(token)
+	if !isUserPassToken(token) {
+		return token, nil
+	}
+	base := strings.TrimRight(panelURL, "/")
+	if err := AssertURLSafe(base); err != nil {
+		return "", err
+	}
+	switch typ {
+	case "sui_api":
+		return s.suiPermanentToken(base, token)
+	case "sbui":
+		return s.sbuiLogin(base, token)
+	default:
+		return token, nil
+	}
+}
+
 func (s *Service) Create(name, typ, panelURL, token string) (Source, error) {
 	typ = strings.TrimSpace(typ)
 	if typ == "" {
@@ -91,6 +146,11 @@ func (s *Service) Create(name, typ, panelURL, token string) (Source, error) {
 	}
 	if typ == "local" {
 		return Source{}, errors.New("local source is managed by system")
+	}
+	var err error
+	token, err = s.ExchangeCredentialToken(typ, panelURL, token)
+	if err != nil {
+		return Source{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := s.db.Exec(`INSERT INTO sources(name,source_type,panel_url,panel_token,enabled,last_sync_status,created_at,updated_at) VALUES(?,?,?,?,1,'pending',?,?)`, name, typ, panelURL, token, now, now)
@@ -101,7 +161,15 @@ func (s *Service) Create(name, typ, panelURL, token string) (Source, error) {
 	return s.Get(id)
 }
 func (s *Service) Update(id int64, name, panelURL, token string, enabled bool) error {
-	_, err := s.db.Exec(`UPDATE sources SET name=?,panel_url=?,panel_token=?,enabled=?,updated_at=? WHERE id=? AND source_type!='local'`, name, panelURL, token, boolInt(enabled), time.Now().UTC().Format(time.RFC3339), id)
+	src, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	token, err = s.ExchangeCredentialToken(src.Type, panelURL, token)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE sources SET name=?,panel_url=?,panel_token=?,enabled=?,updated_at=? WHERE id=? AND source_type!='local'`, name, panelURL, token, boolInt(enabled), time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 func (s *Service) Delete(id int64) error {
@@ -109,15 +177,27 @@ func (s *Service) Delete(id int64) error {
 	return err
 }
 func (s *Service) SyncAll() map[int64]string {
-	rows, _ := s.db.Query(`SELECT id FROM sources WHERE source_type!='local' AND enabled=1 ORDER BY id`)
-	if rows == nil {
-		return map[int64]string{}
+	rows, err := s.db.Query(`SELECT id FROM sources WHERE source_type!='local' AND enabled=1 ORDER BY id`)
+	if err != nil {
+		return map[int64]string{-1: err.Error()}
 	}
 	defer rows.Close()
-	out := map[int64]string{}
+	ids := []int64{}
 	for rows.Next() {
 		var id int64
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			return map[int64]string{-1: err.Error()}
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return map[int64]string{-1: err.Error()}
+	}
+	if err := rows.Close(); err != nil {
+		return map[int64]string{-1: err.Error()}
+	}
+	out := map[int64]string{}
+	for _, id := range ids {
 		r := s.Sync(id)
 		if r != nil {
 			out[id] = r.Error()
@@ -139,9 +219,8 @@ func (s *Service) Sync(id int64) error {
 	status := "ok"
 	if err != nil {
 		status = err.Error()
-	} else if len(links) == 0 {
-		status = "no nodes"
-		err = errors.New(status)
+	} else {
+		status = fmt.Sprintf("ok (%d nodes)", len(links))
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = s.db.Exec(`UPDATE sources SET last_sync_at=?,last_sync_status=?,updated_at=? WHERE id=?`, now, status, now, id)
@@ -167,7 +246,11 @@ func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
 	if err == nil {
 		if ok, _ := inb["success"].(bool); ok {
 			if arr, ok := inb["obj"].([]any); ok {
+				if len(arr) == 0 {
+					return []string{}, nil
+				}
 				var links []string
+				var linkErrs int
 				for _, one := range arr {
 					m, _ := one.(map[string]any)
 					id := fmt.Sprint(m["id"])
@@ -176,6 +259,7 @@ func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
 					}
 					lj, er := s.SuiJSON(src, "/api/inbounds/"+id+"/links", "GET", nil)
 					if er != nil {
+						linkErrs++
 						continue
 					}
 					if a, ok := lj["obj"].([]any); ok {
@@ -186,9 +270,10 @@ func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
 						}
 					}
 				}
-				if len(links) > 0 {
-					return subconv.ParseSubscriptionText(strings.Join(links, "\n")), nil
+				if len(links) == 0 && linkErrs > 0 {
+					return nil, fmt.Errorf("SUI inbounds found but links fetch failed")
 				}
+				return subconv.ParseSubscriptionText(strings.Join(links, "\n")), nil
 			}
 		}
 	}
@@ -367,8 +452,17 @@ func (s *Service) SuiJSON(src Source, path, method string, body any) (map[string
 	if err := AssertURLSafe(base); err != nil {
 		return nil, err
 	}
-	h := map[string]string{"x-panel-token": src.PanelToken, "content-type": "application/json", "accept": "application/json"}
-	return s.JSONRequest(base+path, method, h, body)
+	token := src.PanelToken
+	if isUserPassToken(token) {
+		var err error
+		token, err = s.suiPermanentToken(base, token)
+		if err != nil {
+			return nil, err
+		}
+		_, _ = s.db.Exec(`UPDATE sources SET panel_token=?,updated_at=? WHERE id=?`, token, time.Now().UTC().Format(time.RFC3339), src.ID)
+	}
+	h := map[string]string{"x-panel-token": token, "authorization": "Bearer " + token, "content-type": "application/json", "accept": "application/json"}
+	return s.SignedJSONRequest(base, path, method, h, body, token)
 }
 func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[string]any, error) {
 	base := normalizeSbuiBase(src.PanelURL)
@@ -382,6 +476,7 @@ func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[strin
 		if err != nil {
 			return nil, err
 		}
+		_, _ = s.db.Exec(`UPDATE sources SET panel_token=?,updated_at=? WHERE id=?`, token, time.Now().UTC().Format(time.RFC3339), src.ID)
 	}
 	h := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}
 	if token != "" {
@@ -390,7 +485,27 @@ func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[strin
 	if body != nil {
 		h["content-type"] = "application/json"
 	}
-	return s.JSONRequest(base+path, method, h, body)
+	return s.SignedJSONRequest(base, path, method, h, body, token)
+}
+
+func (s *Service) suiPermanentToken(base, userPass string) (string, error) {
+	parts := strings.SplitN(userPass, ":", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+		return "", errors.New("invalid SUI-Go credential, expected username:password")
+	}
+	j, err := s.JSONRequest(strings.TrimRight(base, "/")+"/auth/api-token", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
+	if err != nil {
+		// Backward-compatible fallback for old SUI-Go builds; token may be a session token there.
+		j, err = s.JSONRequest(strings.TrimRight(base, "/")+"/auth/login", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
+		if err != nil {
+			return "", err
+		}
+	}
+	token := strings.TrimSpace(fmt.Sprint(firstVal(j, "token", "access_token")))
+	if token == "" || token == "<nil>" {
+		return "", errors.New("SUI-Go token API did not return token")
+	}
+	return token, nil
 }
 
 func isUserPassToken(token string) bool {
@@ -412,14 +527,75 @@ func (s *Service) sbuiLogin(base, userPass string) (string, error) {
 	}
 	return token, nil
 }
-func (s *Service) JSONRequest(raw, method string, headers map[string]string, body any) (map[string]any, error) {
+func bodyBytes(body any) []byte {
+	if body == nil {
+		return nil
+	}
+	b, _ := json.Marshal(body)
+	return b
+}
+
+func sha256Hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+func tokenID(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])[:16]
+}
+
+func signPayload(token, method, path, bodyHash, nonce, ts string) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(strings.ToUpper(method) + "\n" + path + "\n" + bodyHash + "\n" + nonce + "\n" + ts))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Service) challenge(base string) (string, string, error) {
+	for _, p := range []string{"/auth/challenge", "/api/v1/auth/challenge"} {
+		j, err := s.JSONRequest(strings.TrimRight(base, "/")+p, "GET", map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}, nil)
+		if err == nil {
+			nonce := strings.TrimSpace(fmt.Sprint(firstVal(j, "nonce")))
+			ts := strings.TrimSpace(fmt.Sprint(firstVal(j, "timestamp")))
+			if nonce != "" && nonce != "<nil>" && ts != "" && ts != "<nil>" {
+				return nonce, ts, nil
+			}
+		}
+	}
+	return "", "", errors.New("handshake challenge unsupported")
+}
+
+func (s *Service) SignedJSONRequest(base, path, method string, headers map[string]string, body any, token string) (map[string]any, error) {
+	bb := bodyBytes(body)
+	bodyHash := sha256Hex(bb)
+	if strings.TrimSpace(token) != "" {
+		if nonce, ts, err := s.challenge(base); err == nil {
+			h := map[string]string{"accept": "application/json", "content-type": "application/json", "user-agent": "subgo/0.4"}
+			for k, v := range headers {
+				if strings.ToLower(k) != "authorization" && strings.ToLower(k) != "x-panel-token" {
+					h[k] = v
+				}
+			}
+			h["x-panel-token-id"] = tokenID(token)
+			h["x-panel-nonce"] = nonce
+			h["x-panel-timestamp"] = ts
+			h["x-panel-body-sha256"] = bodyHash
+			h["x-panel-signature"] = signPayload(token, method, path, bodyHash, nonce, ts)
+			if j, err := s.JSONRequestWithBytes(strings.TrimRight(base, "/")+path, method, h, bb); err == nil {
+				return j, nil
+			}
+		}
+	}
+	return s.JSONRequestWithBytes(strings.TrimRight(base, "/")+path, method, headers, bb)
+}
+
+func (s *Service) JSONRequestWithBytes(raw, method string, headers map[string]string, bb []byte) (map[string]any, error) {
 	if err := AssertURLSafe(raw); err != nil {
 		return nil, err
 	}
 	var br io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		br = bytes.NewReader(b)
+	if bb != nil {
+		br = bytes.NewReader(bb)
 	}
 	req, _ := http.NewRequest(method, raw, br)
 	for k, v := range headers {
@@ -445,6 +621,10 @@ func (s *Service) JSONRequest(raw, method string, headers map[string]string, bod
 		return map[string]any{}, nil
 	}
 	return j, nil
+}
+
+func (s *Service) JSONRequest(raw, method string, headers map[string]string, body any) (map[string]any, error) {
+	return s.JSONRequestWithBytes(raw, method, headers, bodyBytes(body))
 }
 func normalizeSbuiBase(raw string) string {
 	base := strings.TrimRight(raw, "/")

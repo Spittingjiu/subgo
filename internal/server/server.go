@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +39,7 @@ type Server struct {
 	router       *gin.Engine
 	templateData []byte
 	templateMu   sync.RWMutex
+	sourceSyncMu sync.Mutex
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -52,7 +54,35 @@ func New(cfg config.Config) (*Server, error) {
 	s.routes()
 	// Fetch clash template in background
 	go s.refreshClashTemplate()
+	go s.sourceSyncScheduler()
 	return s, nil
+}
+
+func (s *Server) sourceSyncScheduler() {
+	interval := s.cfg.SourceSyncInterval
+	if interval <= 0 {
+		return
+	}
+	log.Printf("[source-sync-scheduler] started: interval=%s", interval)
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for {
+		<-timer.C
+		s.runSourceSyncAll("scheduler")
+		timer.Reset(interval)
+	}
+}
+
+func (s *Server) runSourceSyncAll(reason string) (map[int64]string, bool) {
+	if !s.sourceSyncMu.TryLock() {
+		return map[int64]string{-1: "source sync already running"}, false
+	}
+	defer s.sourceSyncMu.Unlock()
+	res := s.sourceSvc.SyncAll()
+	if reason != "" {
+		log.Printf("[source-sync] %s results=%v", reason, res)
+	}
+	return res, true
 }
 
 func (s *Server) Handler() http.Handler { return s.router }
@@ -222,7 +252,12 @@ func (s *Server) syncSource(c *gin.Context) {
 	jsonOK(c, s.sourceSvc.Sync(id))
 }
 func (s *Server) syncAllSources(c *gin.Context) {
-	c.JSON(200, gin.H{"ok": true, "results": s.sourceSvc.SyncAll()})
+	res, ok := s.runSourceSyncAll("manual")
+	if !ok {
+		c.JSON(409, gin.H{"ok": false, "error": "source sync already running", "results": res})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "results": res})
 }
 func (s *Server) kernelStatus(c *gin.Context) { c.JSON(200, s.conn.KernelStatus()) }
 func (s *Server) connectivityList(c *gin.Context) {

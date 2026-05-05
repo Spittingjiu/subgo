@@ -18,12 +18,14 @@ func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	d, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000")
+	d, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=10000&_journal_mode=WAL")
 	if err != nil {
 		return nil, err
 	}
 	d.SetMaxOpenConns(4)
 	d.SetMaxIdleConns(4)
+	_, _ = d.Exec(`PRAGMA journal_mode=WAL`)
+	_, _ = d.Exec(`PRAGMA busy_timeout=10000`)
 	wrapped := &DB{DB: d}
 	if err := wrapped.Migrate(); err != nil {
 		_ = d.Close()
