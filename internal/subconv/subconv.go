@@ -180,6 +180,11 @@ func rebuildDNSProxyPolicy(tmpl map[string]any, proxies []map[string]any) {
 	dns["proxy-server-nameserver-policy"] = fixed
 }
 
+// ClashProxy converts one raw subscription link into one Mihomo/Clash proxy.
+func ClashProxy(raw string) map[string]any {
+	return clashProxy(raw, 1)
+}
+
 func clashProxy(raw string, idx int) map[string]any {
 	u, err := url.Parse(raw)
 	p := ParseRawLink(raw)

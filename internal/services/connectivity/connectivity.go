@@ -23,9 +23,11 @@ import (
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/subconv"
+	"gopkg.in/yaml.v3"
 )
 
 const KernelBin = "/usr/local/bin/sing-box"
+const MihomoBin = "/usr/local/bin/mihomo"
 const KernelTmp = "/opt/subgo/singbox-install"
 
 type Service struct{ db *sql.DB }
@@ -218,6 +220,11 @@ func (s *Service) checkWithSingBox(id int64, raw string) Result {
 	if p.Host == "" || p.Port == 0 {
 		return Result{NodeID: id, Status: "unknown", LastError: "missing host/port", CheckedAt: now}
 	}
+	if isXHTTPLink(raw) {
+		if _, err := os.Stat(MihomoBin); err == nil {
+			return s.checkWithMihomo(id, raw, now)
+		}
+	}
 	if _, err := os.Stat(KernelBin); err != nil {
 		return s.tcpCheck(id, raw, now)
 	}
@@ -291,6 +298,83 @@ func (s *Service) checkWithSingBox(id int64, raw string) Result {
 		return Result{NodeID: id, Status: "ok", LatencyMS: &lat, CheckedAt: now}
 	}
 	return Result{NodeID: id, Status: "fail", LastError: fmt.Sprintf("HTTP %d", resp.StatusCode), CheckedAt: now}
+}
+
+func (s *Service) checkWithMihomo(id int64, raw string, now string) Result {
+	proxies := []map[string]any{subconv.ClashProxy(raw)}
+	if len(proxies) == 0 || proxies[0] == nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "mihomo: unsupported or malformed proxy", CheckedAt: now}
+	}
+	name, _ := proxies[0]["name"].(string)
+	if name == "" {
+		name = fmt.Sprintf("node-%d", id)
+		proxies[0]["name"] = name
+	}
+	dir, err := os.MkdirTemp("", "subgo-mihomo-")
+	if err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "mihomo temp dir failed", CheckedAt: now}
+	}
+	defer os.RemoveAll(dir)
+	port := 32000 + int(time.Now().UnixNano())%(60999-32000)
+	cfg := map[string]any{
+		"mixed-port": port,
+		"allow-lan":  false,
+		"mode":       "global",
+		"log-level":  "error",
+		"proxies":    proxies,
+		"proxy-groups": []map[string]any{
+			{"name": "PROXY", "type": "select", "proxies": []string{name}},
+		},
+		"rules": []string{"MATCH,PROXY"},
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgYAML, _ := yaml.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, cfgYAML, 0644); err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "mihomo config write failed", CheckedAt: now}
+	}
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer checkCancel()
+	if out, err := exec.CommandContext(checkCtx, MihomoBin, "-t", "-f", cfgPath).CombinedOutput(); err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: fmt.Sprintf("mihomo config: %s", trimLine(string(out))), CheckedAt: now}
+	}
+	runCtx, runCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer runCancel()
+	cmd := exec.CommandContext(runCtx, MihomoBin, "-f", cfgPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "mihomo start failed", CheckedAt: now}
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ready := false
+	for i := 0; i < 50; i++ {
+		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ready {
+		return Result{NodeID: id, Status: "fail", LastError: "mihomo proxy port not ready", CheckedAt: now}
+	}
+	start := time.Now()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer testCancel()
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", addr))
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, Timeout: 8 * time.Second}
+	req, _ := http.NewRequestWithContext(testCtx, "GET", "https://www.gstatic.com/generate_204", nil)
+	resp, err := client.Do(req)
+	lat := time.Since(start).Milliseconds()
+	if err != nil {
+		return Result{NodeID: id, Status: "fail", LastError: fmt.Sprintf("mihomo proxy: %s", trimStr(err.Error(), 160)), CheckedAt: now}
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return Result{NodeID: id, Status: "ok", LatencyMS: &lat, CheckedAt: now}
+	}
+	return Result{NodeID: id, Status: "fail", LastError: fmt.Sprintf("mihomo HTTP %d", resp.StatusCode), CheckedAt: now}
 }
 
 func (s *Service) tcpCheck(id int64, raw string, now string) Result {
@@ -475,4 +559,12 @@ func trimStr(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func isXHTTPLink(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Query().Get("type"), "xhttp") || strings.EqualFold(u.Query().Get("network"), "xhttp")
 }
