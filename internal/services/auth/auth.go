@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ type Admin struct {
 
 func New(db *sql.DB, secret string) *Service {
 	if secret == "" {
+		log.Println("[WARNING] auth.New received empty session secret; using insecure fallback — configure SUBGO_SESSION_SECRET")
 		secret = "subgo-dev-secret-change-me"
 	}
 	return &Service{db: db, secret: []byte(secret)}

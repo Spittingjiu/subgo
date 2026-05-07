@@ -45,6 +45,7 @@ type KernelStatus struct {
 	Path      string `json:"path"`
 	Mode      string `json:"mode"`
 	Kernel    string `json:"kernel"`
+	Extra     any    `json:"extra,omitempty"`
 }
 
 func New(db *sql.DB) *Service { return &Service{db: db} }

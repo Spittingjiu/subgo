@@ -118,6 +118,8 @@
       table{font-size:12px;min-width:620px}td,th{padding:8px 7px;font-size:12px}#nodes table{min-width:520px}#nodes tr{grid-template-columns:minmax(34px,.5fr) minmax(52px,.5fr) minmax(104px,2.6fr) minmax(68px,1fr) minmax(52px,.9fr) minmax(104px,1.8fr)}
       #nodes,#suiNodes,#subs,.log-box{overflow-x:auto;-webkit-overflow-scrolling:touch}#nodes{max-height:58vh!important}#subs input[readonly]{max-width:100%;min-width:0;width:100%}.src-item{padding:12px;border-radius:16px}.chip{max-width:100%}
       .modal-mask{align-items:flex-end;padding:10px}.modal-box{width:100%;max-height:88dvh;border-radius:22px 22px 16px 16px;padding:14px}.modal-node-grid{grid-template-columns:1fr}.sel-list{max-height:46dvh}
+      #addSourceModal{align-items:center!important;justify-content:center!important;padding:18px!important}
+      #addSourceModal .modal-box{width:min(680px,94vw)!important;max-height:82dvh!important;border-radius:24px!important}
       #linkModal .modal-box{width:100%}#linkQr{width:200px;height:200px}#loginCard{width:100%;padding:22px;border-radius:24px}
       .bottom-nav{display:flex!important;padding-bottom:calc(8px + env(safe-area-inset-bottom))}.bottom-nav button{min-width:54px}
     }
@@ -501,7 +503,7 @@ function renderSourcesUI(){
   box.innerHTML=`${renderSourceGroup('SUI源',suiSources,false)}${renderSourceGroup('SBUI源',sbuiSources,false)}${renderSourceGroup('CF源',cfSources,false)}`;
   loadSuiSourceOptions(); renderNodeSourceSelect(); renderModalSourceFilter();
 }
-function focusSource(id){sourceViewId=String(id);switchTab('nodes');renderNodeSourceSelect();renderNodes();}
+async function focusSource(id){sourceViewId=String(id);switchTab('nodes');renderNodeSourceSelect();setLocalAddVisible();const nm=q('#nodeMsg'); if(nm) nm.textContent='';await loadNodes();}
 function openSecurePanel(id){
   const sid=Number(id)||0;
   if(!sid) return;
@@ -726,8 +728,12 @@ function connectivityCell(n){
   if(st==='disconnected' || st==='fail') return `<span class="err" title="${esc(n.connectivity_last_error||'')}">不可用</span>`;
   return `<span class="muted">未检测</span>`;
 }
+function currentNodeRows(){
+  const sid=(sourceViewId==='all'?0:Number(sourceViewId)||0);
+  return (allNodes||[]).filter(n=>(!sid || Number(n.source_id)===sid) && passCfFilter(n));
+}
 function renderNodes(){
-  const rows=(allNodes||[]).filter(n=>passCfFilter(n)), box=q('#nodes');
+  const rows=currentNodeRows(), box=q('#nodes');
   if(!rows.length){box.innerHTML='<div class="muted">该源暂无节点（或被筛选条件过滤）</div>';return;}
   box.innerHTML=`<table><thead><tr><th>ID</th><th>来源</th><th>节点名</th><th><button onclick="checkConnectivity()" title="点击检测当前列表连通性" style="padding:4px 8px">连通性</button></th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(n=>{
     const id=nodeRealId(n);
@@ -1028,25 +1034,32 @@ async function openSubModal(sub=null){
 function closeSubModal(){q('#subModal').classList.add('hide')}
 async function saveSubModal(){
   const nodeIds=[...selectedNodeIds], name=(q('#modalSubName').value||'').trim()||`sub-${Date.now()}`;
-  const autoPrune=q('#modalAutoPrune')?.checked?1:0;
+  const autoPrune=!!q('#modalAutoPrune')?.checked;
   if(!nodeIds.length)return toast('请先选择节点','err');
-  if(editingSubId) await api('/api/subscriptions/'+editingSubId,{method:'PUT',body:JSON.stringify({name,node_ids:nodeIds,auto_prune_unreachable:autoPrune})});
-  else await api('/api/subscriptions',{method:'POST',body:JSON.stringify({name,node_ids:nodeIds,auto_prune_unreachable:autoPrune})});
+  try{
+    const payload={name,node_ids:nodeIds,auto_prune_unreachable:autoPrune};
+    if(editingSubId) await api('/api/subscriptions/'+editingSubId,{method:'PUT',body:JSON.stringify(payload)});
+    else await api('/api/subscriptions',{method:'POST',body:JSON.stringify(payload)});
 
-  // 持久化当前订阅的筛选快照（仅用于前端会话态恢复）
-  const key=String(editingSubId||'new');
-  subFilterState[key]={};
-  for(const [sid,val] of Object.entries(cfFilterDraft||{})){
-    subFilterState[key][String(sid)]={
-      transport:[...(val?.transport||[])],
-      hostType:[...(val?.hostType||[])],
-      alpn:[...(val?.alpn||[])],
-      tag:[...(val?.tag||[])]
-    };
+    // 持久化当前订阅的筛选快照（仅用于前端会话态恢复）
+    const key=String(editingSubId||'new');
+    subFilterState[key]={};
+    for(const [sid,val] of Object.entries(cfFilterDraft||{})){
+      subFilterState[key][String(sid)]={
+        transport:[...(val?.transport||[])],
+        hostType:[...(val?.hostType||[])],
+        alpn:[...(val?.alpn||[])],
+        tag:[...(val?.tag||[])]
+      };
+    }
+
+    closeSubModal();
+    await loadSubs();
+    toast('订阅已保存','ok');
+  }catch(e){
+    toast('保存失败：'+(e?.message||e),'err');
+    console.error(e);
   }
-
-  closeSubModal();
-  loadSubs();
 }
 
 function loadSuiSourceOptions(){const sel=q('#suiSource');if(!sel)return;const prev=sel.value;const suiSources=sources.filter(s=>(String(s?.source_type||'sui_api')==='sui_api'||isSbuiSource(s)) && !isLocalSource(s));sel.innerHTML=suiSources.length?suiSources.map(s=>`<option value="${Number(s.id||0)}">${esc(s.name||'')}${sourceFlavorLabel(s)?` · ${esc(sourceFlavorLabel(s))}`:''} (${esc(s.panel_url||'')})</option>`).join(''):'<option value="">暂无可管理的 SUI/SBUI 源</option>';if(prev&&[...sel.options].some(o=>o.value===prev))sel.value=prev;sel.onchange=()=>loadSuiNodes();}
@@ -1111,10 +1124,8 @@ async function loadSubLogs(){
 
 function applyBootstrap(b){
   sources=b.sources||[];
-  if(!sources.some(x=>String(x.id)===String(sourceViewId))) sourceViewId='all';
-  const sid=(sourceViewId==='all'?0:Number(sourceViewId)||0);
-  const nodes=(b.nodes||[]);
-  allNodes = sid ? nodes.filter(n=>Number(n.source_id)===sid) : nodes;
+  if(sourceViewId!=='all' && !sources.some(x=>String(x.id)===String(sourceViewId))) sourceViewId='all';
+  allNodes = (b.nodes||[]).map(normalizeNodeView);
   renderSourcesUI();
   renderNodeSourceSelect();
   setLocalAddVisible();
