@@ -707,8 +707,7 @@ function renderNodeSourceSelect(){
     sourceItems.push({ id:String(local.id), label:'本地节点', count:Number(local.node_count||0) });
   }
   for(const s of nonLocal){
-      const c=isCf?Number(filteredCountBySource.get(Number(s.id))||0):Number(s.node_count||0);
-    sourceItems.push({ id:String(s.id), label:esc(s.name||''), count:c });
+    sourceItems.push({ id:String(s.id), label:esc(s.name||''), count:Number(s.node_count||0) });
   }
   const total=sourceItems.reduce((a,x)=>a+Number(x.count||0),0);
 
