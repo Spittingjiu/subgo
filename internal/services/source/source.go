@@ -312,20 +312,19 @@ func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
 	return s.fetchSubURL(u, token)
 }
 func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
-	settings := map[string]any{}
+	allSettings := map[string]any{}
+	if j, err := s.XUIJSON(src, "/panel/setting/all", "POST", nil); err == nil {
+		if m, ok := j["obj"].(map[string]any); ok {
+			allSettings = m
+		}
+	}
+	defaultSettings := map[string]any{}
 	if j, err := s.XUIJSON(src, "/panel/setting/defaultSettings", "POST", nil); err == nil {
 		if m, ok := j["obj"].(map[string]any); ok {
-			settings = m
+			defaultSettings = m
 		}
 	}
-	if len(settings) == 0 {
-		if j, err := s.XUIJSON(src, "/panel/setting/all", "POST", nil); err == nil {
-			if m, ok := j["obj"].(map[string]any); ok {
-				settings = m
-			}
-		}
-	}
-	baseSubURL := xuiSubscriptionBase(src.PanelURL, settings)
+	baseSubURLs := xuiSubscriptionBases(src.PanelURL, allSettings, defaultSettings)
 	j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
 	if err != nil {
 		return nil, err
@@ -344,13 +343,21 @@ func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
 				continue
 			}
 			seenSubID[sid] = struct{}{}
-			subURL := strings.TrimRight(baseSubURL, "/") + "/" + url.PathEscape(sid)
-			subLinks, err := s.fetchSubURL(subURL, "")
-			if err != nil {
-				fetchErrs++
-				continue
+			var lastErr error
+			for _, baseSubURL := range baseSubURLs {
+				subURL := strings.TrimRight(baseSubURL, "/") + "/" + url.PathEscape(sid)
+				subLinks, err := s.fetchSubURL(subURL, "")
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				links = append(links, subLinks...)
+				lastErr = nil
+				break
 			}
-			links = append(links, subLinks...)
+			if lastErr != nil {
+				fetchErrs++
+			}
 		}
 	}
 	if len(links) == 0 && fetchErrs > 0 {
@@ -359,32 +366,45 @@ func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
 	return links, nil
 }
 
-func xuiSubscriptionBase(panelURL string, settings map[string]any) string {
-	for _, k := range []string{"subURI", "SubURI"} {
-		if v := strings.TrimSpace(fmt.Sprint(settings[k])); v != "" && v != "<nil>" {
-			return strings.TrimRight(v, "/")
+func xuiSubscriptionBases(panelURL string, allSettings, defaultSettings map[string]any) []string {
+	out := []string{}
+	seen := map[string]struct{}{}
+	add := func(v string) {
+		v = strings.TrimRight(strings.TrimSpace(v), "/")
+		if v == "" || v == "<nil>" {
+			return
 		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
 	}
-	path := strings.TrimSpace(fmt.Sprint(firstVal(settings, "subPath", "SubPath")))
+	path := strings.TrimSpace(fmt.Sprint(firstVal(allSettings, "subPath", "SubPath")))
+	if path == "" || path == "<nil>" {
+		path = strings.TrimSpace(fmt.Sprint(firstVal(defaultSettings, "subPath", "SubPath")))
+	}
 	if path == "" || path == "<nil>" {
 		path = "/sub/"
 	}
-	base := strings.TrimRight(panelURL, "/")
-	if u, err := url.Parse(base); err == nil {
-		// 3x-ui installations commonly use a random web base path. Subscription
-		// routes live at the subscription server root path, not under the panel path.
-		u.Path, u.RawQuery, u.Fragment = "", "", ""
-		// If defaultSettings did not provide a reverse-proxy subURI, fall back to
-		// the panel host with the configured subPort. This matches 3x-ui's own
-		// GetDefaultSettings URL builder and avoids silently probing the panel port.
-		if port := toInt64(firstVal(settings, "subPort", "SubPort")); port > 0 {
-			if !((u.Scheme == "https" && port == 443) || (u.Scheme == "http" && port == 80)) {
-				u.Host = u.Hostname() + ":" + strconv.FormatInt(port, 10)
-			}
-		}
-		base = strings.TrimRight(u.String(), "/")
+	// Prefer explicitly configured reverse proxy URI, then the panel origin plus
+	// subPath. The latter is the common Nginx/Cloudflare deployment shape.
+	for _, k := range []string{"subURI", "SubURI"} {
+		add(fmt.Sprint(allSettings[k]))
 	}
-	return strings.TrimRight(base, "/") + "/" + strings.Trim(strings.TrimSpace(path), "/")
+	if u, err := url.Parse(strings.TrimRight(panelURL, "/")); err == nil {
+		u.Path, u.RawQuery, u.Fragment = "", "", ""
+		add(strings.TrimRight(u.String(), "/") + "/" + strings.Trim(path, "/"))
+	}
+	// 3x-ui defaultSettings may include its own direct subscription-port URL;
+	// keep it as fallback for non-reverse-proxied installs.
+	for _, k := range []string{"subURI", "SubURI"} {
+		add(fmt.Sprint(defaultSettings[k]))
+	}
+	if len(out) == 0 {
+		add(strings.TrimRight(panelURL, "/") + "/" + strings.Trim(path, "/"))
+	}
+	return out
 }
 
 func xuiSubIDsFromInbound(inb map[string]any) []string {
