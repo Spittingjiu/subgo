@@ -313,9 +313,16 @@ func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
 }
 func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
 	settings := map[string]any{}
-	if j, err := s.XUIJSON(src, "/panel/setting/all", "POST", nil); err == nil {
+	if j, err := s.XUIJSON(src, "/panel/setting/defaultSettings", "POST", nil); err == nil {
 		if m, ok := j["obj"].(map[string]any); ok {
 			settings = m
+		}
+	}
+	if len(settings) == 0 {
+		if j, err := s.XUIJSON(src, "/panel/setting/all", "POST", nil); err == nil {
+			if m, ok := j["obj"].(map[string]any); ok {
+				settings = m
+			}
 		}
 	}
 	baseSubURL := xuiSubscriptionBase(src.PanelURL, settings)
@@ -367,6 +374,14 @@ func xuiSubscriptionBase(panelURL string, settings map[string]any) string {
 		// 3x-ui installations commonly use a random web base path. Subscription
 		// routes live at the subscription server root path, not under the panel path.
 		u.Path, u.RawQuery, u.Fragment = "", "", ""
+		// If defaultSettings did not provide a reverse-proxy subURI, fall back to
+		// the panel host with the configured subPort. This matches 3x-ui's own
+		// GetDefaultSettings URL builder and avoids silently probing the panel port.
+		if port := toInt64(firstVal(settings, "subPort", "SubPort")); port > 0 {
+			if !((u.Scheme == "https" && port == 443) || (u.Scheme == "http" && port == 80)) {
+				u.Host = u.Hostname() + ":" + strconv.FormatInt(port, 10)
+			}
+		}
 		base = strings.TrimRight(u.String(), "/")
 	}
 	return strings.TrimRight(base, "/") + "/" + strings.Trim(strings.TrimSpace(path), "/")
