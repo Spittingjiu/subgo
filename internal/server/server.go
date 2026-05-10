@@ -19,6 +19,7 @@ import (
 
 	"github.com/Spittingjiu/subgo/internal/config"
 	"github.com/Spittingjiu/subgo/internal/db"
+	"github.com/Spittingjiu/subgo/internal/models"
 	"github.com/Spittingjiu/subgo/internal/services/auth"
 	"github.com/Spittingjiu/subgo/internal/services/connectivity"
 	"github.com/Spittingjiu/subgo/internal/services/node"
@@ -433,7 +434,49 @@ func (s *Server) renameNode(c *gin.Context) {
 	if name == "" {
 		name = strings.TrimSpace(req.NodeName)
 	}
-	jsonOK(c, s.nodes.Rename(id, name))
+	if name == "" {
+		c.JSON(400, gin.H{"ok": false, "error": "name required"})
+		return
+	}
+	n, err := s.nodes.Get(id)
+	if err != nil {
+		jsonOK(c, err)
+		return
+	}
+	if n.SourceID == 1 || n.SourceName == "本地节点" {
+		jsonOK(c, s.nodes.Rename(id, name))
+		return
+	}
+	if err := s.sourceSvc.RenameNodeByRaw(n.SourceID, n.RawLink, name); err != nil {
+		// Fallback for older sources where a local display number happened to map
+		// to the upstream id. The raw-link match above is the safe/default path.
+		inboundID := nodeInboundID(n)
+		if inboundID <= 0 {
+			c.JSON(errStatus(err), gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		if er := s.sourceSvc.RenameInbound(n.SourceID, inboundID, name); er != nil {
+			c.JSON(errStatus(err), gin.H{"ok": false, "error": err.Error() + "; fallback: " + er.Error()})
+			return
+		}
+	}
+	// Update the local raw link/hash immediately too. Upstream rename changes the
+	// link fragment, so keeping the hash aligned prevents the next sync from
+	// treating the same renamed node as a new node and dropping subscriptions.
+	_ = s.nodes.Rename(id, name)
+	jsonOK(c, nil)
+}
+
+func nodeInboundID(n models.Node) int64 {
+	if strings.HasPrefix(strings.ToUpper(n.DisplayNo), "S") {
+		parts := strings.SplitN(n.DisplayNo[1:], "-", 2)
+		if len(parts) == 2 {
+			if v, err := strconv.ParseInt(strings.TrimLeft(parts[1], "0"), 10, 64); err == nil && v > 0 {
+				return v
+			}
+		}
+	}
+	return n.ID
 }
 func (s *Server) deleteLocalNode(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)

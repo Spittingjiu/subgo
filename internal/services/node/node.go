@@ -81,8 +81,25 @@ func (s *Service) Rename(id int64, name string) error {
 	if err != nil {
 		return err
 	}
-	raw := subconv.WithName(n.RawLink, name)
-	_, err = s.db.Exec(`UPDATE nodes SET node_name=?,raw_link=?,node_hash=?,updated_at=? WHERE id=?`, name, raw, subconv.StableHash(raw), time.Now().UTC().Format(time.RFC3339), id)
+	return s.RenameLocalLink(id, n.RawLink, name)
+}
+
+func (s *Service) RenameLocalLink(id int64, raw, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("name required")
+	}
+	raw = subconv.WithName(raw, name)
+	_, err := s.db.Exec(`UPDATE nodes SET node_name=?,raw_link=?,node_hash=?,updated_at=? WHERE id=?`, name, raw, subconv.StableHash(raw), time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
+func (s *Service) RenameDisplayOnly(id int64, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("name required")
+	}
+	_, err := s.db.Exec(`UPDATE nodes SET node_name=?,updated_at=? WHERE id=?`, name, time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 func (s *Service) DeleteLocal(id int64) error {

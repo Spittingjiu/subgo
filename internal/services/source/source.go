@@ -533,6 +533,49 @@ func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, e
 	}
 	return nil, errors.New("only sui_api/sbui source supports reality quick")
 }
+func (s *Service) RenameNodeByRaw(sourceID int64, rawLink, remark string) error {
+	rawLink = strings.TrimSpace(rawLink)
+	if rawLink == "" {
+		return errors.New("raw link required")
+	}
+	src, err := s.Get(sourceID)
+	if err != nil {
+		return err
+	}
+	targetHash := subconv.StableHash(rawLink)
+	switch src.Type {
+	case "sui_api":
+		j, err := s.SuiJSON(src, "/api/inbounds", "GET", nil)
+		if err != nil {
+			return err
+		}
+		for _, one := range firstArray(j, "obj", "inbounds") {
+			m, _ := one.(map[string]any)
+			id := toInt64(m["id"])
+			if id <= 0 {
+				continue
+			}
+			lj, er := s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d/links", id), "GET", nil)
+			if er != nil {
+				continue
+			}
+			if a, ok := lj["obj"].([]any); ok {
+				for _, v := range a {
+					candidate := strings.TrimSpace(fmt.Sprint(v))
+					if candidate != "" && subconv.StableHash(candidate) == targetHash {
+						return s.RenameInbound(sourceID, id, remark)
+					}
+				}
+			}
+		}
+		return errors.New("upstream inbound not found for node link")
+	case "sbui", "xui", "3x_ui":
+		return errors.New("rename by raw link is not supported for this source type")
+	default:
+		return errors.New("source type does not support upstream rename")
+	}
+}
+
 func (s *Service) RenameInbound(sourceID, inboundID int64, remark string) error {
 	src, err := s.Get(sourceID)
 	if err != nil {
