@@ -685,7 +685,7 @@ func (s *Service) XUIJSON(src Source, path, method string, body any) (map[string
 	if err := AssertURLSafe(base); err != nil {
 		return nil, err
 	}
-	apiBase := xuiPanelAPIBase(base)
+	apiBase := s.resolveXUIBase(base)
 	headers := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4", "x-requested-with": "XMLHttpRequest"}
 	if body != nil {
 		headers["content-type"] = "application/json"
@@ -702,6 +702,49 @@ func (s *Service) XUIJSON(src Source, path, method string, body any) (map[string
 		headers["x-csrf-token"] = csrf
 	}
 	return s.JSONRequestWithClient(client, apiBase+path, method, headers, bodyBytes(body))
+}
+
+func (s *Service) resolveXUIBase(base string) string {
+	base = xuiPanelAPIBase(base)
+	u, err := url.Parse(base)
+	if err != nil || strings.Trim(u.Path, "/") != "" {
+		return base
+	}
+	// 3x-ui installations normally hide the panel behind a random webBasePath.
+	// If the user enters only the origin (https://host), discover that path from
+	// the root redirect and use it for all panel API/login requests.
+	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequest("GET", strings.TrimRight(base, "/")+"/", nil)
+	if err != nil {
+		return base
+	}
+	req.Header.Set("User-Agent", "subgo/0.4")
+	resp, err := client.Do(req)
+	if err != nil {
+		return base
+	}
+	defer resp.Body.Close()
+	loc := strings.TrimSpace(resp.Header.Get("Location"))
+	if loc == "" || (resp.StatusCode != http.StatusMovedPermanently && resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusTemporaryRedirect && resp.StatusCode != http.StatusPermanentRedirect) {
+		return base
+	}
+	lu, err := url.Parse(loc)
+	if err != nil {
+		return base
+	}
+	if lu.IsAbs() {
+		if lu.Scheme != u.Scheme || lu.Host != u.Host {
+			return base
+		}
+		u.Path = lu.Path
+	} else if strings.HasPrefix(loc, "/") {
+		u.Path = lu.Path
+	}
+	u.RawQuery, u.Fragment = "", ""
+	if strings.Trim(u.Path, "/") == "" {
+		return base
+	}
+	return strings.TrimRight(u.String(), "/")
 }
 
 func xuiPanelAPIBase(base string) string {
