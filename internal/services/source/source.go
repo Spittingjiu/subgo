@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
@@ -138,6 +139,10 @@ func (s *Service) ExchangeCredentialToken(typ, panelURL, token string) (string, 
 		return s.suiPermanentToken(base, token)
 	case "sbui":
 		return s.sbuiLogin(base, token)
+	case "xui", "3x_ui":
+		// 3x-ui does not expose a permanent token from username/password; keep
+		// credentials encrypted-at-rest by the host and log in per sync/API call.
+		return token, nil
 	default:
 		return token, nil
 	}
@@ -250,6 +255,8 @@ func (s *Service) fetchLinks(src Source) ([]string, error) {
 		return s.fetchSbuiLinks(src)
 	case "sui_api":
 		return s.fetchSuiLinks(src)
+	case "xui", "3x_ui":
+		return s.fetch3XUILinks(src)
 	default:
 		return nil, fmt.Errorf("unsupported source type %s", src.Type)
 	}
@@ -304,6 +311,99 @@ func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
 	}
 	return s.fetchSubURL(u, token)
 }
+func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
+	settings := map[string]any{}
+	if j, err := s.XUIJSON(src, "/panel/setting/all", "POST", nil); err == nil {
+		if m, ok := j["obj"].(map[string]any); ok {
+			settings = m
+		}
+	}
+	baseSubURL := xuiSubscriptionBase(src.PanelURL, settings)
+	j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
+	if err != nil {
+		return nil, err
+	}
+	arr := firstArray(j, "obj", "inbounds")
+	if len(arr) == 0 {
+		return []string{}, nil
+	}
+	seenSubID := map[string]struct{}{}
+	links := []string{}
+	fetchErrs := 0
+	for _, one := range arr {
+		m, _ := one.(map[string]any)
+		for _, sid := range xuiSubIDsFromInbound(m) {
+			if _, ok := seenSubID[sid]; ok {
+				continue
+			}
+			seenSubID[sid] = struct{}{}
+			subURL := strings.TrimRight(baseSubURL, "/") + "/" + url.PathEscape(sid)
+			subLinks, err := s.fetchSubURL(subURL, "")
+			if err != nil {
+				fetchErrs++
+				continue
+			}
+			links = append(links, subLinks...)
+		}
+	}
+	if len(links) == 0 && fetchErrs > 0 {
+		return nil, fmt.Errorf("3x-ui clients found but subscription fetch failed")
+	}
+	return links, nil
+}
+
+func xuiSubscriptionBase(panelURL string, settings map[string]any) string {
+	for _, k := range []string{"subURI", "SubURI"} {
+		if v := strings.TrimSpace(fmt.Sprint(settings[k])); v != "" && v != "<nil>" {
+			return strings.TrimRight(v, "/")
+		}
+	}
+	path := strings.TrimSpace(fmt.Sprint(firstVal(settings, "subPath", "SubPath")))
+	if path == "" || path == "<nil>" {
+		path = "/sub/"
+	}
+	base := strings.TrimRight(panelURL, "/")
+	if u, err := url.Parse(base); err == nil {
+		// 3x-ui installations commonly use a random web base path. Subscription
+		// routes live at the subscription server root path, not under the panel path.
+		u.Path, u.RawQuery, u.Fragment = "", "", ""
+		base = strings.TrimRight(u.String(), "/")
+	}
+	return strings.TrimRight(base, "/") + "/" + strings.Trim(strings.TrimSpace(path), "/")
+}
+
+func xuiSubIDsFromInbound(inb map[string]any) []string {
+	out := []string{}
+	seen := map[string]struct{}{}
+	add := func(v any) {
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "" || s == "<nil>" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	var settings map[string]any
+	switch v := inb["settings"].(type) {
+	case string:
+		_ = json.Unmarshal([]byte(v), &settings)
+	case map[string]any:
+		settings = v
+	}
+	if settings != nil {
+		if arr, ok := settings["clients"].([]any); ok {
+			for _, one := range arr {
+				c, _ := one.(map[string]any)
+				add(c["subId"])
+			}
+		}
+	}
+	return out
+}
+
 func (s *Service) fetchSubURL(raw, token string) ([]string, error) {
 	if err := AssertURLSafe(raw); err != nil {
 		return nil, err
@@ -407,8 +507,14 @@ func (s *Service) Inbounds(sourceID int64) ([]Inbound, error) {
 			return nil, err
 		}
 		return normalizeInboundArray(firstArray(j, "obj", "inbounds")), nil
+	case "xui", "3x_ui":
+		j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
+		if err != nil {
+			return nil, err
+		}
+		return normalizeInboundArray(firstArray(j, "obj", "inbounds")), nil
 	default:
-		return nil, errors.New("only sui_api/sbui source supports inbounds")
+		return nil, errors.New("only sui_api/sbui/3x-ui source supports inbounds")
 	}
 }
 func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, error) {
@@ -514,6 +620,75 @@ func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[strin
 		h["content-type"] = "application/json"
 	}
 	return s.SignedJSONRequest(base, path, method, h, body, token)
+}
+
+func (s *Service) XUIJSON(src Source, path, method string, body any) (map[string]any, error) {
+	base := strings.TrimRight(src.PanelURL, "/")
+	if err := AssertURLSafe(base); err != nil {
+		return nil, err
+	}
+	apiBase := xuiPanelAPIBase(base)
+	headers := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4", "x-requested-with": "XMLHttpRequest"}
+	if body != nil {
+		headers["content-type"] = "application/json"
+	}
+	if tok := strings.TrimSpace(src.PanelToken); tok != "" && !isUserPassToken(tok) {
+		headers["authorization"] = "Bearer " + tok
+		return s.JSONRequestWithBytes(apiBase+path, method, headers, bodyBytes(body))
+	}
+	client, csrf, err := s.xuiLoginClient(apiBase, src.PanelToken)
+	if err != nil {
+		return nil, err
+	}
+	if csrf != "" && method != "GET" && method != "HEAD" && method != "OPTIONS" {
+		headers["x-csrf-token"] = csrf
+	}
+	return s.JSONRequestWithClient(client, apiBase+path, method, headers, bodyBytes(body))
+}
+
+func xuiPanelAPIBase(base string) string {
+	u, err := url.Parse(strings.TrimRight(base, "/"))
+	if err != nil {
+		return strings.TrimRight(base, "/")
+	}
+	path := strings.TrimRight(u.EscapedPath(), "/")
+	if strings.HasSuffix(path, "/panel") {
+		u.Path = strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/panel")
+	}
+	return strings.TrimRight(u.String(), "/")
+}
+
+func (s *Service) xuiLoginClient(base, userPass string) (*http.Client, string, error) {
+	parts := strings.SplitN(userPass, ":", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+		return nil, "", errors.New("invalid 3x-ui credential, expected username:password or API token")
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Timeout: s.client.Timeout, Jar: jar}
+	csrf := ""
+	if j, err := s.JSONRequestWithClient(client, strings.TrimRight(base, "/")+"/csrf-token", "GET", map[string]string{"accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}, nil); err == nil {
+		csrf = strings.TrimSpace(fmt.Sprint(firstVal(j, "obj", "token")))
+	}
+	form := url.Values{}
+	form.Set("username", strings.TrimSpace(parts[0]))
+	form.Set("password", parts[1])
+	headers := map[string]string{"content-type": "application/x-www-form-urlencoded; charset=UTF-8", "accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}
+	if csrf != "" {
+		headers["x-csrf-token"] = csrf
+	}
+	j, err := s.JSONRequestWithClient(client, strings.TrimRight(base, "/")+"/login", "POST", headers, []byte(form.Encode()))
+	if err != nil {
+		return nil, "", err
+	}
+	if ok, _ := j["success"].(bool); !ok {
+		return nil, "", fmt.Errorf("3x-ui login failed: %s", strings.TrimSpace(fmt.Sprint(j["msg"])))
+	}
+	if csrf == "" {
+		if j, err := s.JSONRequestWithClient(client, strings.TrimRight(base, "/")+"/panel/csrf-token", "GET", map[string]string{"accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}, nil); err == nil {
+			csrf = strings.TrimSpace(fmt.Sprint(firstVal(j, "obj", "token")))
+		}
+	}
+	return client, csrf, nil
 }
 
 func (s *Service) suiPermanentToken(base, userPass string) (string, error) {
@@ -632,6 +807,40 @@ func (s *Service) JSONRequestWithBytes(raw, method string, headers map[string]st
 		}
 	}
 	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	text, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	var j map[string]any
+	_ = json.Unmarshal(text, &j)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return j, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if j == nil {
+		return map[string]any{}, nil
+	}
+	return j, nil
+}
+
+func (s *Service) JSONRequestWithClient(client *http.Client, raw, method string, headers map[string]string, bb []byte) (map[string]any, error) {
+	if err := AssertURLSafe(raw); err != nil {
+		return nil, err
+	}
+	var br io.Reader
+	if bb != nil {
+		br = bytes.NewReader(bb)
+	}
+	req, _ := http.NewRequest(method, raw, br)
+	for k, v := range headers {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
