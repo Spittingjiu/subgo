@@ -99,6 +99,7 @@ func (s *Server) Close() error {
 func (s *Server) routes() {
 	s.router.GET("/", s.app)
 	s.router.GET("/app", s.app)
+	s.router.GET("/favicon.svg", s.favicon)
 	s.router.GET("/about", s.home)
 	s.router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "subgo", "ts": time.Now().UTC().Format(time.RFC3339)})
@@ -848,4 +849,21 @@ func (s *Server) app(c *gin.Context) {
 		}
 	}
 	c.String(http.StatusOK, "subgo 管理台文件缺失")
+}
+
+func (s *Server) favicon(c *gin.Context) {
+	paths := []string{
+		filepath.Join("web", "favicon.svg"),
+		filepath.Join("src", "web", "favicon.svg"),
+		filepath.Join("/opt/subgo/src/web", "favicon.svg"),
+	}
+	for _, path := range paths {
+		if b, err := os.ReadFile(path); err == nil {
+			c.Header("Content-Type", "image/svg+xml")
+			c.Header("Cache-Control", "public, max-age=3600")
+			c.String(http.StatusOK, string(b))
+			return
+		}
+	}
+	c.Status(http.StatusNotFound)
 }

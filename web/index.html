@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0, viewport-fit=cover"/>
-  <title>万象星枢 · subGO</title>
+  <title>万象星枢</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <style>
     :root{--bg:#f5f5f7;--bg2:#f1f1f4;--surface:#ffffff;--surface2:#fbfbfd;--surface3:#f0f0f3;--text:#111111;--text2:#1d1d1f;--muted:#6e6e73;--line:#d2d2d7;--line2:#e5e5ea;--ok:#1b7a3b;--err:#c62828;--accent:#111111;--soft:#e8e8ed;--shadow:0 18px 50px rgba(0,0,0,.08)}
@@ -166,7 +166,7 @@
           <h3 style="margin:0">新增连接源</h3>
           <button onclick="openAddSourceModal()">新建连接源</button>
         </div>
-        <div class="muted" style="margin-top:8px">支持 SUI / Cloudflare 订阅 / SBUI / 3x-ui，点击按钮后选择类型。</div>
+        <div class="muted" style="margin-top:8px">支持 SUI / SBUI / 3x-ui，点击按钮后选择类型。</div>
         <div id="msg" class="muted" style="margin-top:8px"></div>
       </div>
       <div class="card">
@@ -297,7 +297,6 @@
       </div>
       <div class="row" style="gap:8px;margin-bottom:12px">
         <button id="addTypeSui" onclick="setAddSourceType('sui')">SUI</button>
-        <button id="addTypeCf" onclick="setAddSourceType('cf')">Cloudflare</button>
         <button id="addTypeSbui" onclick="setAddSourceType('sbui')">SBUI</button>
         <button id="addTypeXui" onclick="setAddSourceType('xui')">3x-ui</button>
       </div>
@@ -388,7 +387,6 @@ function setAddSourceType(kind){
   addSourceType=kind;
   const cfg={
     sui:{name:'名称（例如：东京）',panel:'面板地址（https://panel.example.com）',token:'SUI API Token（或填账号:密码，会自动换 token）',hint:'连接 SUI / SUI-Go 面板，账号密码只用于换永久 token。'},
-    cf:{name:'名称（例如：CF-订阅）',panel:'CF 订阅链接（https://.../sub）',token:'访问密钥（可选，不填可留空）',hint:'连接 Cloudflare/普通订阅链接。'},
     sbui:{name:'名称（例如：SBUI-本地）',panel:'SBUI 地址（https://sbui.example.com）',token:'API Token（或填 用户名:密码，会自动换 token）',hint:'连接 SBUI/S-Matrix /api/v1/sub/default。'},
     xui:{name:'名称（例如：3x-ui-主面板）',panel:'3x-ui 面板地址（https://panel.example.com/随机路径）',token:'API Token 或 用户名:密码',hint:'连接 MHSanaei/3x-ui，自动登录读取入站客户端 subId 并同步订阅节点。'}
   }[kind]||{};
@@ -396,7 +394,7 @@ function setAddSourceType(kind){
   q('#sourcePanelInput').placeholder=cfg.panel||'面板地址或订阅链接';
   q('#sourceTokenInput').placeholder=cfg.token||'API Token 或账号:密码';
   q('#addSourceHint').textContent=cfg.hint||'';
-  [['sui','addTypeSui'],['cf','addTypeCf'],['sbui','addTypeSbui'],['xui','addTypeXui']].forEach(([k,id])=>q('#'+id)?.classList.toggle('bnav-on',k===kind));
+  [['sui','addTypeSui'],['sbui','addTypeSbui'],['xui','addTypeXui']].forEach(([k,id])=>q('#'+id)?.classList.toggle('bnav-on',k===kind));
 }
 function saveAddSourceModal(){return addSource(addSourceType||'sui')}
 async function addSource(kind='sui'){
@@ -405,7 +403,7 @@ async function addSource(kind='sui'){
     const name=q('#sourceNameInput').value.trim();
     const panel_url=q('#sourcePanelInput').value.trim();
     const panel_token=q('#sourceTokenInput').value.trim();
-    const source_type=k==='sbui'?'sbui':(k==='xui'?'xui':(k==='cf'?'cf_sub':'sui_api'));
+    const source_type=k==='sbui'?'sbui':(k==='xui'?'xui':'sui_api');
     await api('/api/sources',{method:'POST',body:JSON.stringify({name,panel_url,panel_token,source_type})});
     q('#sourceNameInput').value='';q('#sourcePanelInput').value='';q('#sourceTokenInput').value='';
     closeAddSourceModal();
@@ -479,7 +477,6 @@ function sourceFlavorLabel(s){
   return 'SUI-未知';
 }
 function renderSourceCard(s){
-  const isCf=isCfSource(s);
   const isLocal=isLocalSource(s);
   const enabled=Number(s?.enabled??1)?1:0;
   const sid=Number(s?.id||0);
@@ -490,7 +487,7 @@ function renderSourceCard(s){
   const sync=esc(sourceSyncText(s)||'');
   const flavor=sourceFlavorLabel(s);
   const flavorTag=flavor?`<span class="pill">${esc(flavor)}</span>`:'';
-  return `<div class="src-item" style="opacity:${enabled?1:.65}"><div class="row" style="justify-content:space-between"><div><b>${nm}</b> ${flavorTag}<div class="muted">${panel}</div><div class="muted" style="font-size:12px">节点数：${Number((s.node_count||0)||0)}</div></div><div class="row">${statusTag}${sync?`<span class="pill">${sync}</span>`:''}<button onclick="focusSource(${sid})">看节点</button>${isLocal?'':(isCf?`<button onclick="openCfFilterModal(${sid})">节点筛选</button>`:`<button onclick="openSecurePanel(${sid})">安全访问</button>`)+toggleBtn+`<button onclick="editSourceName(${sid})">改名</button><button onclick="deleteSource(${sid})">删除</button>`}</div></div></div>`;
+  return `<div class="src-item" style="opacity:${enabled?1:.65}"><div class="row" style="justify-content:space-between"><div><b>${nm}</b> ${flavorTag}<div class="muted">${panel}</div><div class="muted" style="font-size:12px">节点数：${Number((s.node_count||0)||0)}</div></div><div class="row">${statusTag}${sync?`<span class="pill">${sync}</span>`:''}<button onclick="focusSource(${sid})">看节点</button>${isLocal?'':`<button onclick="openSecurePanel(${sid})">安全访问</button>`+toggleBtn+`<button onclick="editSourceName(${sid})">改名</button><button onclick="deleteSource(${sid})">删除</button>`}</div></div></div>`;
 }
 function renderSourceGroup(title, list, open=true){
   return `<details ${open?'open':''} style="border:1px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--bg2);margin-top:8px"><summary style="cursor:pointer;user-select:none;font-weight:700">${title}（${list.length}）</summary><div style="margin-top:8px">${list.length?list.map(renderSourceCard).join(''):'<div class="muted">暂无</div>'}</div></details>`;
@@ -503,9 +500,8 @@ function renderSourcesUI(){
   const ordered=orderedSources();
   const sbuiSources=ordered.filter(s=>isSbuiSource(s));
   const xuiSources=ordered.filter(s=>isXuiSource(s));
-  const cfSources=ordered.filter(s=>isCfSource(s)&&!isSbuiSource(s)&&!isXuiSource(s));
-  const suiSources=ordered.filter(s=>!isCfSource(s)&&!isSbuiSource(s)&&!isXuiSource(s));
-  box.innerHTML=`${renderSourceGroup('SUI源',suiSources,false)}${renderSourceGroup('SBUI源',sbuiSources,false)}${renderSourceGroup('3x-ui源',xuiSources,false)}${renderSourceGroup('CF源',cfSources,false)}`;
+  const suiSources=ordered.filter(s=>!isSbuiSource(s)&&!isXuiSource(s));
+  box.innerHTML=`${renderSourceGroup('SUI源',suiSources,false)}${renderSourceGroup('SBUI源',sbuiSources,false)}${renderSourceGroup('3x-ui源',xuiSources,false)}`;
   loadSuiSourceOptions(); renderNodeSourceSelect(); renderModalSourceFilter();
 }
 async function focusSource(id){sourceViewId=String(id);switchTab('nodes');renderNodeSourceSelect();setLocalAddVisible();const nm=q('#nodeMsg'); if(nm) nm.textContent='';await loadNodes();}
@@ -711,8 +707,7 @@ function renderNodeSourceSelect(){
     sourceItems.push({ id:String(local.id), label:'本地节点', count:Number(local.node_count||0) });
   }
   for(const s of nonLocal){
-    const isCf=isCfSource(s);
-    const c=isCf?Number(filteredCountBySource.get(Number(s.id))||0):Number(s.node_count||0);
+      const c=isCf?Number(filteredCountBySource.get(Number(s.id))||0):Number(s.node_count||0);
     sourceItems.push({ id:String(s.id), label:esc(s.name||''), count:c });
   }
   const total=sourceItems.reduce((a,x)=>a+Number(x.count||0),0);
