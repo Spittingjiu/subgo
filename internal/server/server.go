@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -420,12 +421,19 @@ func (s *Server) toggleNode(c *gin.Context) {
 }
 func (s *Server) renameNode(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var req struct{ Name string }
+	var req struct {
+		Name     string `json:"name"`
+		NodeName string `json:"node_name"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	jsonOK(c, s.nodes.Rename(id, req.Name))
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = strings.TrimSpace(req.NodeName)
+	}
+	jsonOK(c, s.nodes.Rename(id, name))
 }
 func (s *Server) deleteLocalNode(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -575,8 +583,32 @@ func (s *Server) panelProxy(c *gin.Context) {
 	for _, sc := range resp.Header.Values("Set-Cookie") {
 		c.Writer.Header().Add("Set-Cookie", rewriteProxySetCookie(sc, sid))
 	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && method == "GET" && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		bodyBytes = injectPanelProxyBase(bodyBytes, sid)
+		c.Header("Content-Length", strconv.Itoa(len(bodyBytes)))
+		c.Status(resp.StatusCode)
+		_, _ = c.Writer.Write(bodyBytes)
+		return
+	}
 	c.Status(resp.StatusCode)
 	_, _ = io.Copy(c.Writer, io.LimitReader(resp.Body, 16<<20))
+}
+
+func injectPanelProxyBase(body []byte, sid int64) []byte {
+	prefix := "/panel-proxy/" + strconv.FormatInt(sid, 10)
+	script := `<script>(function(){const P='` + prefix + `';function r(u){try{if(typeof u!=='string')return u;if(u.startsWith('/api/')||u.startsWith('/auth/'))return P+u;return u}catch(e){return u}}const of=window.fetch;window.fetch=function(input,init){if(typeof input==='string')input=r(input);else if(input&&input.url){const nu=r(input.url);if(nu!==input.url)input=new Request(nu,input)}return of.call(this,input,init)};const oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=r(u);return oo.apply(this,arguments)};})();</script>`
+	if bytes.Contains(body, []byte(script)) {
+		return body
+	}
+	if i := bytes.Index(bytes.ToLower(body), []byte("</head>")); i >= 0 {
+		out := make([]byte, 0, len(body)+len(script))
+		out = append(out, body[:i]...)
+		out = append(out, script...)
+		out = append(out, body[i:]...)
+		return out
+	}
+	return append([]byte(script), body...)
 }
 func filterProxyCookie(raw string) string {
 	parts := strings.Split(raw, ";")

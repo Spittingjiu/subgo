@@ -440,7 +440,22 @@ func (s *Service) RenameInbound(sourceID, inboundID int64, remark string) error 
 		return err
 	}
 	if src.Type == "sui_api" {
-		_, err = s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d", inboundID), "PUT", map[string]any{"remark": remark})
+		payload := map[string]any{"remark": remark}
+		if cur, er := s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d/full", inboundID), "GET", nil); er == nil {
+			if obj, ok := cur["obj"].(map[string]any); ok {
+				payload = obj
+				payload["remark"] = remark
+			}
+		} else if cur, er := s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d", inboundID), "GET", nil); er == nil {
+			if obj, ok := cur["obj"].(map[string]any); ok {
+				payload = obj
+				payload["remark"] = remark
+			}
+		}
+		_, err = s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d/full", inboundID), "PUT", payload)
+		if err != nil {
+			_, err = s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d", inboundID), "PUT", payload)
+		}
 		return err
 	}
 	return errors.New("only sui_api/sbui source supports rename")
