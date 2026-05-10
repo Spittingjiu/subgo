@@ -472,8 +472,10 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	seen := make(map[string]struct{})
 	for _, raw := range links {
-		// Skip non-link garbage (HTML/JS/etc)
-		if !strings.Contains(raw, "://") || len(raw) > 2000 {
+		// Skip non-link garbage (HTML/JS/etc). 3x-ui Reality/ML-DSA links can be
+		// very long because mldsa65Verify is embedded in the URL, so keep the
+		// guard high enough for legitimate proxy links.
+		if !strings.Contains(raw, "://") || len(raw) > 20000 {
 			continue
 		}
 		p := subconv.ParseRawLink(raw)
