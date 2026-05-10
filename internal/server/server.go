@@ -597,7 +597,15 @@ func (s *Server) panelProxy(c *gin.Context) {
 
 func injectPanelProxyBase(body []byte, sid int64) []byte {
 	prefix := "/panel-proxy/" + strconv.FormatInt(sid, 10)
-	script := `<script>(function(){const P='` + prefix + `';function r(u){try{if(typeof u!=='string')return u;if(u.startsWith('/api/')||u.startsWith('/auth/'))return P+u;return u}catch(e){return u}}const of=window.fetch;window.fetch=function(input,init){if(typeof input==='string')input=r(input);else if(input&&input.url){const nu=r(input.url);if(nu!==input.url)input=new Request(nu,input)}return of.call(this,input,init)};const oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=r(u);return oo.apply(this,arguments)};})();</script>`
+	// SUI-Go and similar panels commonly use absolute root paths from their SPA
+	// code. When proxied under /panel-proxy/:sourceId, rewrite both API calls
+	// and hard redirects such as location.href='/login.html'; otherwise the
+	// browser escapes to subgo's own /login.html and gets a 404.
+	body = bytes.ReplaceAll(body, []byte("location.href='/login.html'"), []byte("location.href='"+prefix+"/login.html'"))
+	body = bytes.ReplaceAll(body, []byte(`location.href="/login.html"`), []byte(`location.href="`+prefix+`/login.html"`))
+	body = bytes.ReplaceAll(body, []byte("location.href='/'"), []byte("location.href='"+prefix+"/'"))
+	body = bytes.ReplaceAll(body, []byte(`location.href="/"`), []byte(`location.href="`+prefix+`/"`))
+	script := `<script>(function(){const P='` + prefix + `';function r(u){try{if(typeof u!=='string')return u;if(u.startsWith('/api/')||u.startsWith('/auth/')||u==='/login.html'||u==='/index.html'||u==='/')return P+u;return u}catch(e){return u}}const of=window.fetch;window.fetch=function(input,init){if(typeof input==='string')input=r(input);else if(input&&input.url){const nu=r(input.url);if(nu!==input.url)input=new Request(nu,input)}return of.call(this,input,init)};const oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=r(u);return oo.apply(this,arguments)};document.addEventListener('click',function(e){const a=e.target&&e.target.closest&&e.target.closest('a[href^="/"]');if(a&&!a.href.includes('/panel-proxy/'))a.href=r(a.getAttribute('href'))},true);})();</script>`
 	if bytes.Contains(body, []byte(script)) {
 		return body
 	}
