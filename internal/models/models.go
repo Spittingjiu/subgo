@@ -44,9 +44,10 @@ type Subscription struct {
 	Name                 string     `json:"name"`
 	Token                string     `json:"token"`
 	SourceIDsJSON        string     `json:"-"`
-	NodeIDsJSON          string     `json:"-"`
+	NodeHashesJSON       string     `json:"-"`
 	SourceIDs            []int64    `json:"source_ids"`
-	NodeIDs              []int64    `json:"node_ids"`
+	NodeHashes           []string   `json:"node_hashes"`
+	SourceNames          []string   `json:"source_names,omitempty"`
 	Enabled              bool       `json:"enabled"`
 	AutoPruneUnreachable bool       `json:"auto_prune_unreachable"`
 	AccessCount          int64      `json:"access_count"`

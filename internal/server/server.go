@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,12 @@ func New(cfg config.Config) (*Server, error) {
 	r.Use(gin.Recovery(), requestID(), accessHeaders())
 	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), router: r}
 	s.routes()
+	// Migrate existing subscriptions from integer node IDs to node_hash strings
+	if n, err := s.migrateSubNodeIDsToHashes(); err != nil {
+		log.Printf("[migration] node_ids→node_hashes error: %v", err)
+	} else if n > 0 {
+		log.Printf("[migration] converted %d subscription(s) from node IDs to hashes", n)
+	}
 	// Fetch clash template in background
 	go s.refreshClashTemplate()
 	go s.sourceSyncScheduler()
@@ -84,6 +91,11 @@ func (s *Server) runSourceSyncAll(reason string) (map[int64]string, bool) {
 	if reason != "" {
 		log.Printf("[source-sync] %s results=%v", reason, res)
 	}
+	if pruned, err := s.subs.RepairOrphanNodeHashes(); err != nil {
+		log.Printf("[source-sync] prune orphan nodes error: %v", err)
+	} else if pruned > 0 {
+		log.Printf("[source-sync] pruned %d orphan node references from subscriptions", pruned)
+	}
 	return res, true
 }
 
@@ -101,9 +113,11 @@ func (s *Server) routes() {
 	s.router.GET("/app", s.app)
 	s.router.GET("/favicon.svg", s.favicon)
 	s.router.GET("/about", s.home)
-	s.router.GET("/healthz", func(c *gin.Context) {
+	healthHandler := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "subgo", "ts": time.Now().UTC().Format(time.RFC3339)})
-	})
+	}
+	s.router.GET("/healthz", healthHandler)
+	s.router.GET("/health", healthHandler)
 	s.router.GET("/api/version", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true, "name": "subgo", "version": Version}) })
 	s.router.POST("/api/auth/login", s.login)
 	s.router.POST("/api/auth/logout", s.logout)
@@ -311,13 +325,13 @@ func (s *Server) auditLogs(c *gin.Context) {
 
 func (s *Server) viewHome(c *gin.Context) {
 	sources, _ := s.sourceSvc.List()
-	nodes, _ := s.nodes.List()
+	nodes, _ := s.nodes.List(0)
 	subs, _ := s.subs.List(s.publicBase(c))
 	c.JSON(200, gin.H{"ok": true, "stats": gin.H{"sources": len(sources), "nodes": len(nodes), "subscriptions": len(subs)}})
 }
 func (s *Server) viewBootstrap(c *gin.Context) {
 	sources, _ := s.sourceSvc.List()
-	nodes, _ := s.nodes.List()
+	nodes, _ := s.nodes.List(0)
 	subs, _ := s.subs.List(s.publicBase(c))
 	base := strings.TrimRight(s.publicBase(c), "/")
 	subEnriched := make([]gin.H, len(subs))
@@ -327,7 +341,8 @@ func (s *Server) viewBootstrap(c *gin.Context) {
 			"name":                   sub.Name,
 			"token":                  sub.Token,
 			"source_ids":             sub.SourceIDs,
-			"node_ids":               sub.NodeIDs,
+			"node_hashes":            sub.NodeHashes,
+			"source_names":           sub.SourceNames,
 			"enabled":                sub.Enabled,
 			"auto_prune_unreachable": sub.AutoPruneUnreachable,
 			"access_count":           sub.AccessCount,
@@ -400,7 +415,8 @@ func (s *Server) bridgePushSource(c *gin.Context) {
 }
 
 func (s *Server) listNodes(c *gin.Context) {
-	v, err := s.nodes.List()
+	sourceID, _ := strconv.ParseInt(c.Query("sourceId"), 10, 64)
+	v, err := s.nodes.List(sourceID)
 	jsonResultKey(c, "nodes", v, err)
 }
 func (s *Server) createLocalNode(c *gin.Context) {
@@ -497,7 +513,8 @@ func (s *Server) listSubscriptions(c *gin.Context) {
 			"name":                   sub.Name,
 			"token":                  sub.Token,
 			"source_ids":             sub.SourceIDs,
-			"node_ids":               sub.NodeIDs,
+			"node_hashes":            sub.NodeHashes,
+			"source_names":           sub.SourceNames,
 			"enabled":                sub.Enabled,
 			"auto_prune_unreachable": sub.AutoPruneUnreachable,
 			"access_count":           sub.AccessCount,
@@ -513,16 +530,16 @@ func (s *Server) listSubscriptions(c *gin.Context) {
 }
 func (s *Server) createSubscription(c *gin.Context) {
 	var req struct {
-		Name                 string  `json:"name"`
-		NodeIDs              []int64 `json:"node_ids"`
-		SourceIDs            []int64 `json:"source_ids"`
-		AutoPruneUnreachable bool    `json:"auto_prune_unreachable"`
+		Name                 string   `json:"name"`
+		NodeHashes           []string `json:"node_hashes"`
+		SourceIDs            []int64  `json:"source_ids"`
+		AutoPruneUnreachable bool     `json:"auto_prune_unreachable"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	sub, err := s.subs.Create(req.Name, req.NodeIDs, req.SourceIDs, req.AutoPruneUnreachable)
+	sub, err := s.subs.Create(req.Name, req.NodeHashes, req.SourceIDs, req.AutoPruneUnreachable)
 	if err == nil {
 		sub.PlainURL = s.publicBase(c) + "/sub/" + sub.Token
 	}
@@ -531,17 +548,17 @@ func (s *Server) createSubscription(c *gin.Context) {
 func (s *Server) updateSubscription(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var req struct {
-		Name                 string  `json:"name"`
-		NodeIDs              []int64 `json:"node_ids"`
-		SourceIDs            []int64 `json:"source_ids"`
-		Enabled              *bool   `json:"enabled"`
-		AutoPruneUnreachable bool    `json:"auto_prune_unreachable"`
+		Name                 string   `json:"name"`
+		NodeHashes           []string `json:"node_hashes"`
+		SourceIDs            []int64  `json:"source_ids"`
+		Enabled              *bool    `json:"enabled"`
+		AutoPruneUnreachable bool     `json:"auto_prune_unreachable"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	jsonOK(c, s.subs.Update(id, req.Name, req.NodeIDs, req.SourceIDs, req.Enabled, req.AutoPruneUnreachable))
+	jsonOK(c, s.subs.Update(id, req.Name, req.NodeHashes, req.SourceIDs, req.Enabled, req.AutoPruneUnreachable))
 }
 func (s *Server) deleteSubscription(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -866,4 +883,61 @@ func (s *Server) favicon(c *gin.Context) {
 		}
 	}
 	c.Status(http.StatusNotFound)
+}
+
+// migrateSubNodeIDsToHashes converts existing subscriptions from storing
+// integer node IDs to node_hash strings. Returns the number of subscriptions
+// that were converted.
+func (s *Server) migrateSubNodeIDsToHashes() (int, error) {
+	rows, err := s.db.Query(`SELECT id, node_ids_json FROM subscriptions`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type pair struct {
+		id   int64
+		json string
+	}
+	var subs []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.id, &p.json); err != nil {
+			return 0, err
+		}
+		subs = append(subs, p)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	converted := 0
+	for _, sub := range subs {
+		// Try to parse as integer array first
+		var intIDs []int64
+		if err := json.Unmarshal([]byte(sub.json), &intIDs); err != nil || len(intIDs) == 0 {
+			// Check if it's already strings (hashes)
+			var strHashes []string
+			if err := json.Unmarshal([]byte(sub.json), &strHashes); err != nil || len(strHashes) == 0 {
+				continue
+			}
+			// Already hash strings, skip
+			continue
+		}
+
+		// Convert int IDs to hash strings
+		var hashes []string
+		for _, nid := range intIDs {
+			var h string
+			if err := s.db.QueryRow(`SELECT node_hash FROM nodes WHERE id=?`, nid).Scan(&h); err == nil {
+				hashes = append(hashes, h)
+			}
+		}
+		newJSON, _ := json.Marshal(hashes)
+		if _, err := s.db.Exec(`UPDATE subscriptions SET node_ids_json=? WHERE id=?`, string(newJSON), sub.id); err != nil {
+			return converted, err
+		}
+		converted++
+	}
+	return converted, nil
 }

@@ -333,7 +333,7 @@ let currentModalGeneralImports={general:{v2rayn:'',v2rayng:''},clash:{v2rayn:'',
 let currentLinkTab='general';
 let theme='dark';
 let activeTab='home';
-const selectedNodeIds=new Set();
+const selectedNodeHashes=new Set();
 let cfFilterSourceId=null;
 let cfFilterDraft={};
 // per-subscription persisted filter snapshots
@@ -945,7 +945,7 @@ function renderSubsUI(arr){
       v2rayng:`v2rayng://install-config?url=${encodeURIComponent(full)}&remark=${encodeURIComponent((s.name||'subgo')+'-通用')}`
     };
     const row=document.createElement('div');row.className='src-item';
-    row.innerHTML=`<div class="row" style="justify-content:space-between"><div style="flex:1 1 460px;min-width:280px"><b>${esc(s.name||'')}</b><div class="muted">源：${esc(((s.source_names||[]).join(', ')||'-'))} · 节点数：${Number((s.node_ids||[]).length||0)}</div><input readonly value="${esc(full)}" style="margin-top:8px;width:min(82%,560px)"></div><div class="row" style="justify-content:flex-end"><button data-act="copy">复制通用</button><button data-act="copy-clash">复制Clash</button><button data-act="edit">编辑</button><button data-act="delete">删除</button></div></div>`;
+    row.innerHTML=`<div class="row" style="justify-content:space-between"><div style="flex:1 1 460px;min-width:280px"><b>${esc(s.name||'')}</b><div class="muted">源：${esc(((s.source_names||[]).join(', ')||'-'))} · 节点数：${Number((s.node_hashes||[]).length||0)}</div><input readonly value="${esc(full)}" style="margin-top:8px;width:min(82%,560px)"></div><div class="row" style="justify-content:flex-end"><button data-act="copy">复制通用</button><button data-act="copy-clash">复制Clash</button><button data-act="edit">编辑</button><button data-act="delete">删除</button></div></div>`;
     row.querySelector('input').onclick=e=>e.target.select();
     row.querySelector('[data-act="copy"]').onclick=()=>openLinkModal(full, clashImportUri, generalImportUris);
     row.querySelector('[data-act="copy-clash"]').onclick=()=>openLinkModal(clashUrl, clashImportUri, {}, 'clash');
@@ -981,24 +981,25 @@ function modalNodes(){
 }
 function pruneSelectedByCfFilter(){
   // 订阅编辑时，避免“筛选外的 CF 节点”继续残留在已选列表里
-  const nodeById=new Map((modalAllNodes||[]).map(n=>[nodeRealId(n), n]));
+  const nodeByHash=new Map((modalAllNodes||[]).map(n=>[String(n.node_hash||''), n]));
   const sourceById=new Map((sources||[]).map(s=>[Number(s.id), s]));
-  for(const id of [...selectedNodeIds]){
-    const n=nodeById.get(Number(id));
+  for(const hash of [...selectedNodeHashes]){
+    const n=nodeByHash.get(String(hash));
     if(!n) continue;
     const src=sourceById.get(Number(n.source_id)) || {name:n.source_name, source_type:n.source_type};
     if(!isCfSource(src)) continue;
-    if(!passCfFilter(n)) selectedNodeIds.delete(Number(id));
+    if(!passCfFilter(n)) selectedNodeHashes.delete(String(hash));
   }
 }
 function renderSubModal(){
   pruneSelectedByCfFilter();
   const picked=q('#modalPicked'), list=q('#modalNodeList'), nodes=modalNodes();
-  const chosen=modalAllNodes.filter(n=>selectedNodeIds.has(nodeRealId(n)));
-  picked.innerHTML=chosen.length?chosen.map(n=>`<span class="chip">${esc(n.node_name||n.display_id||String(n.display_id||n.id).padStart(3,'0'))} <a href="javascript:void(0)" data-rm="${nodeRealId(n)}" style="color:#c9d2ff;text-decoration:none">×</a></span>`).join(''):'<span class="muted">未选择节点</span>';
-  list.innerHTML=nodes.length?`<div class="modal-node-grid">${nodes.map(n=>`<label class="modal-node-item" style="display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:10px;cursor:pointer"><div style="min-width:0"><div class="modal-node-title">${esc(n.node_name||'')}</div><div class="modal-node-meta">${esc(n.display_id||String(n.display_id||n.id).padStart(3,'0'))} · ${esc(n.source_name||n.source_id)}</div></div><input type="checkbox" data-nid="${nodeRealId(n)}" ${selectedNodeIds.has(nodeRealId(n))?'checked':''} style="width:18px;height:18px;justify-self:end"></label>`).join('')}</div>`:'<div class="muted">该源暂无节点</div>';
-  list.querySelectorAll('input[data-nid]').forEach(el=>el.onchange=(e)=>{const id=Number(e.target.dataset.nid);if(e.target.checked)selectedNodeIds.add(id);else selectedNodeIds.delete(id);renderSubModal();});
-  picked.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{selectedNodeIds.delete(Number(el.dataset.rm));renderSubModal();});
+  const chosen=modalAllNodes.filter(n=>selectedNodeHashes.has(String(n.node_hash||'')));
+  const nh=(n)=>String(n.node_hash||'');
+  picked.innerHTML=chosen.length?chosen.map(n=>`<span class="chip">${esc(n.node_name||n.display_id||String(n.display_id||n.id).padStart(3,'0'))} <a href="javascript:void(0)" data-rm="${esc(nh(n))}" style="color:#c9d2ff;text-decoration:none">×</a></span>`).join(''):'<span class="muted">未选择节点</span>';
+  list.innerHTML=nodes.length?`<div class="modal-node-grid">${nodes.map(n=>`<label class="modal-node-item" style="display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px;border-radius:10px;cursor:pointer"><div style="min-width:0"><div class="modal-node-title">${esc(n.node_name||'')}</div><div class="modal-node-meta">${esc(n.display_id||String(n.display_id||n.id).padStart(3,'0'))} · ${esc(n.source_name||n.source_id)}</div></div><input type="checkbox" data-nhash="${esc(nh(n))}" ${selectedNodeHashes.has(nh(n))?'checked':''} style="width:18px;height:18px;justify-self:end"></label>`).join('')}</div>`:'<div class="muted">该源暂无节点</div>';
+  list.querySelectorAll('input[data-nhash]').forEach(el=>el.onchange=(e)=>{const h=String(e.target.dataset.nhash);if(e.target.checked)selectedNodeHashes.add(h);else selectedNodeHashes.delete(h);renderSubModal();});
+  picked.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{selectedNodeHashes.delete(String(el.dataset.rm));renderSubModal();});
 }
 async function openSubModal(sub=null){
   try{
@@ -1006,9 +1007,9 @@ async function openSubModal(sub=null){
   q('#subModalTitle').textContent=sub?'编辑订阅':'新建订阅';
   q('#modalSubName').value=sub?.name||'';
   if(q('#modalAutoPrune')) q('#modalAutoPrune').checked=Number(sub?.auto_prune_unreachable||0)===1;
-  selectedNodeIds.clear();
-  const rawNodeIds=Array.isArray(sub?.node_ids)?sub.node_ids:[];
-  rawNodeIds.forEach(id=>selectedNodeIds.add(Number(id)));
+  selectedNodeHashes.clear();
+  const rawNodeHashes=Array.isArray(sub?.node_hashes)?sub.node_hashes:[];
+  rawNodeHashes.forEach(h=>selectedNodeHashes.add(String(h)));
 
   // 切换到编辑某个订阅时，恢复该订阅自己的筛选状态，避免沿用上一个订阅/页面的 draft
   const key=String(editingSubId||'new');
@@ -1032,11 +1033,11 @@ async function openSubModal(sub=null){
 }
 function closeSubModal(){q('#subModal').classList.add('hide')}
 async function saveSubModal(){
-  const nodeIds=[...selectedNodeIds], name=(q('#modalSubName').value||'').trim()||`sub-${Date.now()}`;
+  const nodeHashes=[...selectedNodeHashes], name=(q('#modalSubName').value||'').trim()||`sub-${Date.now()}`;
   const autoPrune=!!q('#modalAutoPrune')?.checked;
-  if(!nodeIds.length)return toast('请先选择节点','err');
+  if(!nodeHashes.length)return toast('请先选择节点','err');
   try{
-    const payload={name,node_ids:nodeIds,auto_prune_unreachable:autoPrune};
+    const payload={name,node_hashes:nodeHashes,auto_prune_unreachable:autoPrune};
     if(editingSubId) await api('/api/subscriptions/'+editingSubId,{method:'PUT',body:JSON.stringify(payload)});
     else await api('/api/subscriptions',{method:'POST',body:JSON.stringify(payload)});
 
