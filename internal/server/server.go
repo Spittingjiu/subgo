@@ -26,6 +26,7 @@ import (
 	"github.com/Spittingjiu/subgo/internal/services/node"
 	"github.com/Spittingjiu/subgo/internal/services/source"
 	"github.com/Spittingjiu/subgo/internal/services/subscription"
+	"github.com/Spittingjiu/subgo/internal/subconv"
 	"github.com/gin-gonic/gin"
 )
 
@@ -55,11 +56,19 @@ func New(cfg config.Config) (*Server, error) {
 	r.Use(gin.Recovery(), requestID(), accessHeaders())
 	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), router: r}
 	s.routes()
-	// Migrate existing subscriptions from integer node IDs to node_hash strings
+	// Migrate existing subscriptions from integer node IDs to stable node_hash strings.
 	if n, err := s.migrateSubNodeIDsToHashes(); err != nil {
 		log.Printf("[migration] node_ids→node_hashes error: %v", err)
 	} else if n > 0 {
 		log.Printf("[migration] converted %d subscription(s) from node IDs to hashes", n)
+	}
+	// Normalize legacy hashes that included URL fragments (#display name).
+	// Without this, renaming an upstream node changes the hash and can silently
+	// drop selected nodes from subscriptions on the next source sync.
+	if n, err := s.normalizeNodeHashes(); err != nil {
+		log.Printf("[migration] normalize node hashes error: %v", err)
+	} else if n > 0 {
+		log.Printf("[migration] normalized %d node hash reference(s)", n)
 	}
 	// Fetch clash template in background
 	go s.refreshClashTemplate()
@@ -940,4 +949,103 @@ func (s *Server) migrateSubNodeIDsToHashes() (int, error) {
 		converted++
 	}
 	return converted, nil
+}
+
+// normalizeNodeHashes rewrites legacy node_hash values that were calculated
+// from the full raw link including the URL fragment/display name. It also
+// updates subscription node_hash references so existing subscriptions keep the
+// same selected nodes after a rename-stable hash migration.
+func (s *Server) normalizeNodeHashes() (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	type nodeHashPair struct {
+		id  int64
+		old string
+		new string
+	}
+	rows, err := tx.Query(`SELECT id,node_hash,raw_link FROM nodes`)
+	if err != nil {
+		return 0, err
+	}
+	var changed []nodeHashPair
+	for rows.Next() {
+		var id int64
+		var oldHash, raw string
+		if err := rows.Scan(&id, &oldHash, &raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		newHash := subconv.StableHash(raw)
+		if newHash != "" && newHash != oldHash {
+			changed = append(changed, nodeHashPair{id: id, old: oldHash, new: newHash})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(changed) == 0 {
+		return 0, nil
+	}
+	remap := map[string]string{}
+	for _, ch := range changed {
+		remap[ch.old] = ch.new
+	}
+
+	refUpdates := 0
+	subRows, err := tx.Query(`SELECT id,node_ids_json FROM subscriptions`)
+	if err != nil {
+		return 0, err
+	}
+	for subRows.Next() {
+		var id int64
+		var rawJSON string
+		if err := subRows.Scan(&id, &rawJSON); err != nil {
+			subRows.Close()
+			return 0, err
+		}
+		var hashes []string
+		if err := json.Unmarshal([]byte(rawJSON), &hashes); err != nil {
+			continue
+		}
+		changedSub := false
+		seen := map[string]bool{}
+		out := make([]string, 0, len(hashes))
+		for _, h := range hashes {
+			if nh, ok := remap[h]; ok {
+				h = nh
+				changedSub = true
+				refUpdates++
+			}
+			if h != "" && !seen[h] {
+				seen[h] = true
+				out = append(out, h)
+			}
+		}
+		if changedSub {
+			b, _ := json.Marshal(out)
+			if _, err := tx.Exec(`UPDATE subscriptions SET node_ids_json=? WHERE id=?`, string(b), id); err != nil {
+				subRows.Close()
+				return 0, err
+			}
+		}
+	}
+	if err := subRows.Close(); err != nil {
+		return 0, err
+	}
+
+	nodeUpdates := 0
+	for _, ch := range changed {
+		if _, err := tx.Exec(`UPDATE nodes SET node_hash=? WHERE id=?`, ch.new, ch.id); err != nil {
+			return nodeUpdates + refUpdates, err
+		}
+		nodeUpdates++
+	}
+	if err := tx.Commit(); err != nil {
+		return nodeUpdates + refUpdates, err
+	}
+	return nodeUpdates + refUpdates, nil
 }

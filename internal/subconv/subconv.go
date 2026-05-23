@@ -62,8 +62,21 @@ func ParseRawLink(raw string) ParsedLink {
 }
 
 func StableHash(raw string) string {
-	h := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+	h := sha256.Sum256([]byte(StableHashInput(raw)))
 	return hex.EncodeToString(h[:])
+}
+
+// StableHashInput returns the canonical identity string used for node_hash.
+// Subscription selections must survive display-name/remark changes, which are
+// stored in the URL fragment (#name). Keep all connection-affecting parts, but
+// deliberately drop the fragment so renames do not orphan subscriptions.
+func StableHashInput(raw string) string {
+	canonical := strings.TrimSpace(raw)
+	if u, err := url.Parse(canonical); err == nil && u.Scheme != "" {
+		u.Fragment = ""
+		canonical = u.String()
+	}
+	return strings.TrimSpace(canonical)
 }
 func WithName(raw, name string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
