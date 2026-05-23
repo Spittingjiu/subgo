@@ -235,7 +235,7 @@ func clashProxy(raw string, idx int) map[string]any {
 			m["tls"] = true
 		}
 		flow := q.Get("flow")
-		if flow != "" && network != "xhttp" {
+		if flow != "" {
 			m["flow"] = flow
 		}
 		if sni != "" {
@@ -262,6 +262,12 @@ func clashProxy(raw string, idx int) map[string]any {
 			xopts := map[string]any{"path": first(q.Get("path"), "/")}
 			if xhost != "" {
 				xopts["host"] = xhost
+			}
+			// Mihomo xhttp mode only accepts stream-one, stream-up or packet-up.
+			// Xray share links may contain mode=auto; leaving it out lets Mihomo use
+			// its compatible default instead of emitting an invalid config value.
+			if mode := strings.TrimSpace(q.Get("mode")); mode == "stream-one" || mode == "stream-up" || mode == "packet-up" {
+				xopts["mode"] = mode
 			}
 			m["xhttp-opts"] = xopts
 		}
