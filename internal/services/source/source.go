@@ -551,7 +551,7 @@ func (s *Service) Inbounds(sourceID int64) ([]Inbound, error) {
 		if err != nil {
 			return nil, err
 		}
-		return normalizeInboundArray(firstArray(j, "obj", "inbounds")), nil
+		return normalizeXUIClientArray(firstArray(j, "obj", "inbounds")), nil
 	default:
 		return nil, errors.New("only sui_api/sbui/3x-ui source supports inbounds")
 	}
@@ -616,12 +616,16 @@ func (s *Service) xuiRealityQuick(src Source, remark string) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
+	email := safeXUIClientEmail(remark)
+	if email == "" {
+		email = "u" + emailSeed
+	}
 	shortID, err := randomHex(4)
 	if err != nil {
 		return nil, err
 	}
 	settings, _ := json.Marshal(map[string]any{
-		"clients":    []map[string]any{{"id": uuid, "flow": "", "email": "u" + emailSeed, "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true, "tgId": "", "subId": subID, "reset": 0}},
+		"clients":    []map[string]any{{"id": uuid, "flow": "", "email": email, "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true, "tgId": "", "subId": subID, "reset": 0}},
 		"decryption": "none", "encryption": "none",
 	})
 	stream, _ := json.Marshal(map[string]any{
@@ -763,20 +767,7 @@ func (s *Service) RenameInbound(sourceID, inboundID int64, remark string) error 
 		return err
 	}
 	if src.Type == "xui" || src.Type == "3x_ui" {
-		j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
-		if err != nil {
-			return err
-		}
-		for _, one := range firstArray(j, "obj", "inbounds") {
-			m, _ := one.(map[string]any)
-			if toInt64(m["id"]) != inboundID {
-				continue
-			}
-			m["remark"] = remark
-			_, err = s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/update/%d", inboundID), "POST", m)
-			return err
-		}
-		return errors.New("3x-ui inbound not found")
+		return s.xuiRenameClient(src, inboundID, remark)
 	}
 	return errors.New("only sui_api/sbui/3x-ui source supports rename")
 }
@@ -794,10 +785,115 @@ func (s *Service) DeleteInbound(sourceID, inboundID int64) error {
 		return err
 	}
 	if src.Type == "xui" || src.Type == "3x_ui" {
-		_, err = s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/del/%d", inboundID), "POST", nil)
-		return err
+		return s.xuiDeleteClient(src, inboundID)
 	}
 	return errors.New("only sui_api/sbui/3x-ui source supports delete")
+}
+
+func (s *Service) xuiRenameClient(src Source, clientID int64, remark string) error {
+	inb, client, clientKey, err := s.xuiFindClient(src, clientID)
+	if err != nil {
+		return err
+	}
+	client["email"] = remark
+	settings, _ := json.Marshal(map[string]any{"clients": []map[string]any{client}})
+	_, err = s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/updateClient/%s", url.PathEscape(clientKey)), "POST", map[string]any{"id": toInt64(inb["id"]), "settings": string(settings)})
+	return err
+}
+
+func (s *Service) xuiDeleteClient(src Source, clientID int64) error {
+	inb, _, clientKey, err := s.xuiFindClient(src, clientID)
+	if err != nil {
+		return err
+	}
+	j, err := s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/%d/delClient/%s", toInt64(inb["id"]), url.PathEscape(clientKey)), "POST", nil)
+	if err != nil {
+		return err
+	}
+	if ok, has := j["success"].(bool); has && !ok {
+		msg := strings.TrimSpace(fmt.Sprint(j["msg"]))
+		if strings.Contains(strings.ToLower(msg), "no client remained") {
+			del, er := s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/del/%d", toInt64(inb["id"])), "POST", nil)
+			if er != nil {
+				return er
+			}
+			if ok, has := del["success"].(bool); has && !ok {
+				return errors.New(strings.TrimSpace(fmt.Sprint(del["msg"])))
+			}
+			return nil
+		}
+		if msg == "" {
+			msg = "3x-ui client delete failed"
+		}
+		return errors.New(msg)
+	}
+	return nil
+}
+
+func safeXUIClientEmail(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range v {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if len(out) > 48 {
+		out = out[:48]
+	}
+	return strings.Trim(out, ".-_")
+}
+
+func (s *Service) xuiFindClient(src Source, clientID int64) (map[string]any, map[string]any, string, error) {
+	j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	for _, one := range firstArray(j, "obj", "inbounds") {
+		inb, _ := one.(map[string]any)
+		settings := map[string]any{}
+		switch v := inb["settings"].(type) {
+		case string:
+			_ = json.Unmarshal([]byte(v), &settings)
+		case map[string]any:
+			settings = v
+		}
+		clients, _ := settings["clients"].([]any)
+		stats := xuiClientStats(inb)
+		for idx, oneClient := range clients {
+			client, _ := oneClient.(map[string]any)
+			if client == nil {
+				continue
+			}
+			statID := xuiClientStatID(client, stats)
+			if statID != clientID && toInt64(client["_subgo_client_id"]) != clientID {
+				if generated := xuiSyntheticClientID(inb, client, idx); generated != clientID {
+					continue
+				}
+			}
+			key := xuiClientKey(strings.TrimSpace(fmt.Sprint(inb["protocol"])), client)
+			if key == "" {
+				return nil, nil, "", errors.New("3x-ui client key is empty")
+			}
+			return inb, client, key, nil
+		}
+	}
+	return nil, nil, "", errors.New("3x-ui client not found")
+}
+
+func xuiClientKey(protocol string, client map[string]any) string {
+	switch strings.ToLower(protocol) {
+	case "trojan":
+		return strings.TrimSpace(fmt.Sprint(client["password"]))
+	case "shadowsocks":
+		return strings.TrimSpace(fmt.Sprint(firstVal(client, "email", "id", "password")))
+	default:
+		return strings.TrimSpace(fmt.Sprint(client["id"]))
+	}
 }
 func (s *Service) SuiJSON(src Source, path, method string, body any) (map[string]any, error) {
 	base := strings.TrimRight(src.PanelURL, "/")
@@ -1141,6 +1237,90 @@ func firstArray(j map[string]any, keys ...string) []any {
 	}
 	return nil
 }
+
+func normalizeXUIClientArray(arr []any) []Inbound {
+	out := []Inbound{}
+	for _, v := range arr {
+		inb, _ := v.(map[string]any)
+		if inb == nil {
+			continue
+		}
+		inboundID := toInt64(inb["id"])
+		proto := strings.TrimSpace(fmt.Sprint(firstVal(inb, "protocol", "type")))
+		settings := map[string]any{}
+		switch raw := inb["settings"].(type) {
+		case string:
+			_ = json.Unmarshal([]byte(raw), &settings)
+		case map[string]any:
+			settings = raw
+		}
+		clients, _ := settings["clients"].([]any)
+		stats := xuiClientStats(inb)
+		if len(clients) == 0 {
+			out = append(out, Inbound{ID: inboundID, DisplayID: fmt.Sprintf("%03d", inboundID), Remark: fmt.Sprint(firstVal(inb, "remark", "tag", "node_name")), Protocol: proto, Port: firstVal(inb, "port", "listen_port"), Enable: fmt.Sprint(firstVal(inb, "enable", "enabled")) != "false", Raw: inb})
+			continue
+		}
+		for idx, oneClient := range clients {
+			client, _ := oneClient.(map[string]any)
+			if client == nil {
+				continue
+			}
+			cid := xuiClientStatID(client, stats)
+			if cid <= 0 {
+				cid = xuiSyntheticClientID(inb, client, idx)
+			}
+			enabled := fmt.Sprint(firstVal(inb, "enable", "enabled")) != "false" && fmt.Sprint(firstVal(client, "enable", "enabled")) != "false"
+			remark := strings.TrimSpace(fmt.Sprint(firstVal(client, "email", "id", "password")))
+			display := fmt.Sprintf("%03d/%s", inboundID, remark)
+			if remark == "" {
+				display = fmt.Sprintf("%03d/%03d", inboundID, cid)
+			}
+			out = append(out, Inbound{ID: cid, DisplayID: display, Remark: remark, Protocol: proto, Port: firstVal(inb, "port", "listen_port"), Enable: enabled, Raw: map[string]any{"inbound": inb, "client": client}})
+		}
+	}
+	return out
+}
+
+func xuiClientStats(inb map[string]any) []map[string]any {
+	out := []map[string]any{}
+	arr, _ := inb["clientStats"].([]any)
+	for _, one := range arr {
+		m, _ := one.(map[string]any)
+		if m != nil {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func xuiClientStatID(client map[string]any, stats []map[string]any) int64 {
+	uuid := strings.TrimSpace(fmt.Sprint(client["id"]))
+	email := strings.TrimSpace(fmt.Sprint(client["email"]))
+	subID := strings.TrimSpace(fmt.Sprint(client["subId"]))
+	for _, st := range stats {
+		if uuid != "" && uuid == strings.TrimSpace(fmt.Sprint(st["uuid"])) {
+			return toInt64(st["id"])
+		}
+		if email != "" && email == strings.TrimSpace(fmt.Sprint(st["email"])) {
+			return toInt64(st["id"])
+		}
+		if subID != "" && subID == strings.TrimSpace(fmt.Sprint(st["subId"])) {
+			return toInt64(st["id"])
+		}
+	}
+	return 0
+}
+
+func xuiSyntheticClientID(inb, client map[string]any, idx int) int64 {
+	seed := fmt.Sprintf("%v|%v|%v|%v", inb["id"], idx, client["id"], firstVal(client, "email", "password", "subId"))
+	sum := sha256.Sum256([]byte(seed))
+	v := int64(sum[0])<<24 | int64(sum[1])<<16 | int64(sum[2])<<8 | int64(sum[3])
+	if v < 0 {
+		v = -v
+	}
+	return 900000000 + (v % 100000000)
+}
+
 func normalizeInboundArray(arr []any) []Inbound {
 	out := []Inbound{}
 	for _, v := range arr {
