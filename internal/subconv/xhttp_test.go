@@ -25,3 +25,15 @@ func TestVLESSXHTTPKeepsValidMode(t *testing.T) {
 		t.Fatalf("expected valid xhttp mode to be preserved, got %#v", xopts["mode"])
 	}
 }
+
+func TestVLESSXHTTPPrefersExplicitHostOverSNI(t *testing.T) {
+	raw := "vless://5fd76956-639c-4801-b6e3-235f22d449f4@45.143.130.90:35832?type=xhttp&path=%2F&host=45.143.130.90&security=reality&sni=www.apple.com&pbk=yLNyOGFSI1ZnFNT8W8BfpB5TdQQHNPhXpXFdgyXMVhM&sid=f7da5bdb6eb35aea&flow=xtls-rprx-vision&fp=chrome#xhttpsjc"
+	p := ClashProxy(raw)
+	xopts := p["xhttp-opts"].(map[string]any)
+	if xopts["host"] != "45.143.130.90" {
+		t.Fatalf("expected explicit xhttp host to be preserved, got %#v", xopts["host"])
+	}
+	if p["servername"] != "www.apple.com" {
+		t.Fatalf("expected SNI/servername to remain www.apple.com, got %#v", p["servername"])
+	}
+}

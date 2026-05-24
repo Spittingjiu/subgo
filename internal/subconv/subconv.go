@@ -253,12 +253,11 @@ func clashProxy(raw string, idx int) map[string]any {
 			}
 		}
 		if network == "xhttp" {
-			xhost := ""
-			if security == "reality" && sni != "" {
-				xhost = sni
-			} else {
-				xhost = q.Get("host")
-			}
+			// Prefer explicit transport Host from the share link. For Reality xhttp,
+			// Host and SNI can intentionally differ (for example SJC uses Host=IP
+			// while SNI=www.apple.com). Falling back to SNI is only safe when Host is
+			// absent.
+			xhost := first(q.Get("host"), sni)
 			xopts := map[string]any{"path": first(q.Get("path"), "/")}
 			if xhost != "" {
 				xopts["host"] = xhost
