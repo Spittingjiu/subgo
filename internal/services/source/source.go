@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -568,7 +570,123 @@ func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, e
 	if src.Type == "sui_api" {
 		return s.SuiJSON(src, "/api/inbounds/add-reality-quick", "POST", map[string]any{"remark": remark})
 	}
-	return nil, errors.New("only sui_api/sbui source supports reality quick")
+	if src.Type == "xui" || src.Type == "3x_ui" {
+		return s.xuiRealityQuick(src, remark)
+	}
+	return nil, errors.New("only sui_api/sbui/3x-ui source supports reality quick")
+}
+
+func (s *Service) xuiRealityQuick(src Source, remark string) (map[string]any, error) {
+	port := int64(20000)
+	if arr, err := s.Inbounds(src.ID); err == nil {
+		used := map[int64]struct{}{}
+		maxPort := int64(19999)
+		for _, inb := range arr {
+			p := toInt64(inb.Port)
+			if p > 0 {
+				used[p] = struct{}{}
+				if p > maxPort {
+					maxPort = p
+				}
+			}
+		}
+		for p := maxPort + 1; p < maxPort+2000; p++ {
+			if p < 20000 {
+				continue
+			}
+			if _, ok := used[p]; !ok {
+				port = p
+				break
+			}
+		}
+	}
+	uuid, err := randomUUID()
+	if err != nil {
+		return nil, err
+	}
+	priv, pub, err := xrayX25519()
+	if err != nil {
+		return nil, err
+	}
+	subID, err := randomToken(16)
+	if err != nil {
+		return nil, err
+	}
+	emailSeed, err := randomToken(6)
+	if err != nil {
+		return nil, err
+	}
+	shortID, err := randomHex(4)
+	if err != nil {
+		return nil, err
+	}
+	settings, _ := json.Marshal(map[string]any{
+		"clients":    []map[string]any{{"id": uuid, "flow": "", "email": "u" + emailSeed, "limitIp": 0, "totalGB": 0, "expiryTime": 0, "enable": true, "tgId": "", "subId": subID, "reset": 0}},
+		"decryption": "none", "encryption": "none",
+	})
+	stream, _ := json.Marshal(map[string]any{
+		"network": "tcp", "security": "reality", "externalProxy": []any{},
+		"realitySettings": map[string]any{
+			"show": false, "xver": 0, "target": "www.amazon.com:443", "serverNames": []string{"www.amazon.com", "amazon.com"}, "privateKey": priv,
+			"minClientVer": "", "maxClientVer": "", "maxTimediff": 0, "shortIds": []string{shortID},
+			"settings": map[string]any{"publicKey": pub, "fingerprint": "chrome", "serverName": "", "spiderX": "/"},
+		},
+		"tcpSettings": map[string]any{"acceptProxyProtocol": false, "header": map[string]any{"type": "none"}},
+	})
+	sniffing, _ := json.Marshal(map[string]any{"enabled": false, "destOverride": []string{"http", "tls", "quic", "fakedns"}, "metadataOnly": false, "routeOnly": false})
+	payload := map[string]any{"up": 0, "down": 0, "total": 0, "remark": remark, "enable": true, "expiryTime": 0, "listen": "", "port": port, "protocol": "vless", "settings": string(settings), "streamSettings": string(stream), "sniffing": string(sniffing)}
+	return s.XUIJSON(src, "/panel/api/inbounds/add", "POST", payload)
+}
+
+func randomUUID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+func randomToken(n int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b), nil
+}
+
+func randomHex(nBytes int) (string, error) {
+	b := make([]byte, nBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func xrayX25519() (string, string, error) {
+	out, err := exec.Command("xray", "x25519").Output()
+	if err != nil {
+		return "", "", err
+	}
+	priv, pub := "", ""
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "PrivateKey:") {
+			priv = strings.TrimSpace(strings.TrimPrefix(line, "PrivateKey:"))
+		}
+		if strings.HasPrefix(line, "Password (PublicKey):") {
+			pub = strings.TrimSpace(strings.TrimPrefix(line, "Password (PublicKey):"))
+		}
+	}
+	if priv == "" || pub == "" {
+		return "", "", errors.New("xray x25519 did not return keys")
+	}
+	return priv, pub, nil
 }
 func (s *Service) RenameNodeByRaw(sourceID int64, rawLink, remark string) error {
 	rawLink = strings.TrimSpace(rawLink)
@@ -644,7 +762,23 @@ func (s *Service) RenameInbound(sourceID, inboundID int64, remark string) error 
 		}
 		return err
 	}
-	return errors.New("only sui_api/sbui source supports rename")
+	if src.Type == "xui" || src.Type == "3x_ui" {
+		j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
+		if err != nil {
+			return err
+		}
+		for _, one := range firstArray(j, "obj", "inbounds") {
+			m, _ := one.(map[string]any)
+			if toInt64(m["id"]) != inboundID {
+				continue
+			}
+			m["remark"] = remark
+			_, err = s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/update/%d", inboundID), "POST", m)
+			return err
+		}
+		return errors.New("3x-ui inbound not found")
+	}
+	return errors.New("only sui_api/sbui/3x-ui source supports rename")
 }
 func (s *Service) DeleteInbound(sourceID, inboundID int64) error {
 	src, err := s.Get(sourceID)
@@ -659,7 +793,11 @@ func (s *Service) DeleteInbound(sourceID, inboundID int64) error {
 		_, err = s.SuiJSON(src, fmt.Sprintf("/api/inbounds/%d", inboundID), "DELETE", nil)
 		return err
 	}
-	return errors.New("only sui_api/sbui source supports delete")
+	if src.Type == "xui" || src.Type == "3x_ui" {
+		_, err = s.XUIJSON(src, fmt.Sprintf("/panel/api/inbounds/del/%d", inboundID), "POST", nil)
+		return err
+	}
+	return errors.New("only sui_api/sbui/3x-ui source supports delete")
 }
 func (s *Service) SuiJSON(src Source, path, method string, body any) (map[string]any, error) {
 	base := strings.TrimRight(src.PanelURL, "/")
