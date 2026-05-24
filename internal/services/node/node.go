@@ -22,7 +22,7 @@ func (s *Service) LocalSourceID() (int64, error) {
 }
 
 func (s *Service) List(sourceID int64) ([]models.Node, error) {
-	q := `SELECT n.id,n.source_id,s.name,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.enabled IN (0,1) AND s.enabled=1`
+	q := `SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.enabled IN (0,1) AND s.enabled=1`
 	args := []any{}
 	if sourceID > 0 {
 		q += ` AND n.source_id=?`
@@ -73,7 +73,7 @@ func (s *Service) CreateLocal(raw, name string) (models.Node, error) {
 }
 
 func (s *Service) Get(id int64) (models.Node, error) {
-	row := s.db.QueryRow(`SELECT n.id,n.source_id,s.name,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.id=?`, id)
+	row := s.db.QueryRow(`SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.id=?`, id)
 	return scanNode(row)
 }
 func (s *Service) Toggle(id int64, enabled bool) error {
@@ -126,7 +126,7 @@ func scanNode(scanner interface{ Scan(...any) error }) (models.Node, error) {
 	var ca, ua string
 	var connStatus, connErr sql.NullString
 	var connLat sql.NullInt64
-	if err := scanner.Scan(&n.ID, &n.SourceID, &n.SourceName, &n.DisplayNo, &n.NodeHash, &n.RawLink, &n.NodeName, &n.Protocol, &enabled, &ca, &ua, &connStatus, &connLat, &connErr); err != nil {
+	if err := scanner.Scan(&n.ID, &n.SourceID, &n.SourceName, &n.SourceType, &n.DisplayNo, &n.NodeHash, &n.RawLink, &n.NodeName, &n.Protocol, &enabled, &ca, &ua, &connStatus, &connLat, &connErr); err != nil {
 		return n, err
 	}
 	n.Enabled = enabled == 1

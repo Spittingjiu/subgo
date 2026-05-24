@@ -26,6 +26,7 @@ type Node struct {
 	ID                 int64     `json:"id"`
 	SourceID           int64     `json:"source_id"`
 	SourceName         string    `json:"source_name,omitempty"`
+	SourceType         string    `json:"source_type,omitempty"`
 	DisplayNo          string    `json:"display_no"`
 	NodeHash           string    `json:"node_hash"`
 	RawLink            string    `json:"raw_link"`
