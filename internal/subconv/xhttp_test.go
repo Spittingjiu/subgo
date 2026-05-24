@@ -2,11 +2,11 @@ package subconv
 
 import "testing"
 
-func TestVLESSXHTTPRealityKeepsFlowAndDropsInvalidAutoMode(t *testing.T) {
+func TestVLESSXHTTPRealityDropsFlowAndInvalidAutoMode(t *testing.T) {
 	raw := "vless://580e2d06-ef53-4be4-82fe-92309c3ff0dd@161.118.254.193:20000?flow=xtls-rprx-vision&fp=chrome&host=www.icloud.com&mode=auto&path=%2F&pbk=dRC0nXMl5dCQoJZVg9Hwtc9ulDEoe9Dgijtv-DJXUWo&security=reality&sid=5d65e5ff&sni=www.icloud.com&type=xhttp#SG"
 	p := ClashProxy(raw)
-	if p["flow"] != "xtls-rprx-vision" {
-		t.Fatalf("expected flow to be preserved for xhttp reality, got %#v", p["flow"])
+	if _, ok := p["flow"]; ok {
+		t.Fatalf("xhttp should not emit flow for Mihomo compatibility, got %#v", p["flow"])
 	}
 	xopts, ok := p["xhttp-opts"].(map[string]any)
 	if !ok {
@@ -35,5 +35,13 @@ func TestVLESSXHTTPPrefersExplicitHostOverSNI(t *testing.T) {
 	}
 	if p["servername"] != "www.apple.com" {
 		t.Fatalf("expected SNI/servername to remain www.apple.com, got %#v", p["servername"])
+	}
+}
+
+func TestVLESSXHTTPDoesNotEmitFlow(t *testing.T) {
+	raw := "vless://580e2d06-ef53-4be4-82fe-92309c3ff0dd@161.118.254.193:20000?flow=xtls-rprx-vision&fp=chrome&host=www.icloud.com&mode=auto&path=%2F&pbk=dRC0nXMl5dCQoJZVg9Hwtc9ulDEoe9Dgijtv-DJXUWo&security=reality&sid=5d65e5ff&sni=www.icloud.com&type=xhttp#SG"
+	p := ClashProxy(raw)
+	if _, ok := p["flow"]; ok {
+		t.Fatalf("xhttp should not emit flow, got %#v", p["flow"])
 	}
 }

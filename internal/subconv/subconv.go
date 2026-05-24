@@ -234,9 +234,14 @@ func clashProxy(raw string, idx int) map[string]any {
 		if security != "none" {
 			m["tls"] = true
 		}
-		flow := q.Get("flow")
-		if flow != "" {
-			m["flow"] = flow
+		// Mihomo xhttp connections do not accept flow; keeping it causes
+		// "vision: not a valid supported TLS connection: *xhttp.Conn".
+		// Preserve flow only for non-xhttp transports.
+		if network != "xhttp" {
+			flow := q.Get("flow")
+			if flow != "" {
+				m["flow"] = flow
+			}
 		}
 		if sni != "" {
 			m["servername"] = sni
