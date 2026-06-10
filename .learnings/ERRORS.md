@@ -24,3 +24,29 @@ Use explicit fields and tags for every request field; avoid grouped fields in AP
 ### Resolution
 - **Resolved**: 2026-05-04T07:43:00Z
 - **Notes**: Split request structs into explicitly tagged fields and reran smoke tests.
+
+## [ERR-20260610-001] subgo_mihomo_kernel_refactor_build
+**Logged**: 2026-06-10T11:36:30Z
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+Initial Subgo connectivity-kernel refactor failed build because old sing-box imports/constants were partially removed while legacy fallback helper code still referenced them.
+
+### Error
+`archive/tar` imported and not used; later `undefined: KernelBin` in `connectivity.go`.
+
+### Context
+Changed Subgo testing kernel from sing-box to Mihomo. The default connectivity path was moved to `checkWithMihomo`, but legacy `checkWithSingBox` remained compiled for fallback/reference.
+
+### Suggested Fix
+When switching default engine but keeping fallback code, either remove the fallback fully or keep a distinct legacy constant (`LegacySingBoxBin`) and clean unused imports.
+
+### Metadata
+- Reproducible: yes
+- Related Files: `/opt/subgo/src/internal/services/connectivity/connectivity.go`
+
+### Resolution
+- **Resolved**: 2026-06-10T11:38:00Z
+- **Notes**: Removed unused `archive/tar`, added `LegacySingBoxBin`, and `go test ./...` passes.

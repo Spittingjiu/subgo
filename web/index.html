@@ -185,7 +185,7 @@
         <h3>节点列表（按源查看）</h3>
         <div class="row" style="margin-top:6px">
           <select id="nodeSourceSelect" style="min-width:150px;max-width:190px" onchange="setNodeSource(this.value)"></select>
-          <span id="kernelBadge" class="pill">sing-box 内核：检测中…</span>
+          <span id="kernelBadge" class="pill">Mihomo 测试内核：检测中…</span>
           <button id="kernelToggleBtn" class="btn-small" onclick="toggleKernelInstall()">加载中…</button>
           <button class="btn-small" onclick="syncAllNodes()">同步节点</button>
           <input id="localNodeLink" placeholder="粘贴节点链接" style="min-width:320px;max-width:640px;flex:1 1 520px"/>
@@ -652,11 +652,11 @@ async function refreshKernelStatus(){
     const j=await api('/api/kernel/status');
     kernelInstalled=!!j.installed;
     const b=q('#kernelBadge'), btn=q('#kernelToggleBtn');
-    if(b) b.textContent=`sing-box 内核：${kernelInstalled?'已安装':'未安装'}`;
-    if(btn) btn.textContent=kernelInstalled?'卸载 sing-box':'安装 sing-box';
+    if(b) b.textContent=`Mihomo 测试内核：${kernelInstalled?'已安装':'未安装'}`;
+    if(btn) btn.textContent=kernelInstalled?'卸载 Mihomo':'安装 Mihomo';
   }catch(e){
     const b=q('#kernelBadge'), btn=q('#kernelToggleBtn');
-    if(b) b.textContent='sing-box 内核：状态异常';
+    if(b) b.textContent='Mihomo 测试内核：状态异常';
     if(btn) btn.textContent='重试检测';
   }
 }
@@ -665,10 +665,10 @@ async function toggleKernelInstall(){
     const btn=q('#kernelToggleBtn'); if(btn) btn.disabled=true;
     if(kernelInstalled){
       await api('/api/kernel/uninstall',{method:'POST',body:'{}'});
-      toast('sing-box sing-box 已卸载','ok');
+      toast('Mihomo 测试内核已卸载','ok');
     }else{
       await api('/api/kernel/install',{method:'POST',body:'{}'});
-      toast('sing-box sing-box 已安装','ok');
+      toast('Mihomo 测试内核已安装','ok');
     }
   }catch(e){
     const nm=q('#nodeMsg'); if(nm){nm.className='err'; nm.textContent=e.message;}

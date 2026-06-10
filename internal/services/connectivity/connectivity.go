@@ -1,7 +1,6 @@
 package connectivity
 
 import (
-	"archive/tar"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -26,9 +25,51 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const KernelBin = "/usr/local/bin/sing-box"
 const MihomoBin = "/usr/local/bin/mihomo"
-const KernelTmp = "/opt/subgo/singbox-install"
+const LegacySingBoxBin = "/usr/local/bin/sing-box"
+const KernelTmp = "/opt/subgo/mihomo-install"
+
+// moveFile moves a file, falling back to copy-on-cross-device.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// cross-device fallback
+	sf, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sf.Close()
+	df, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(df, sf); err != nil {
+		df.Close()
+		return err
+	}
+	df.Close()
+	os.Remove(src)
+	return nil
+}
+
+// copyFile copies a file with the requested mode.
+func copyFile(src, dst string, mode os.FileMode) error {
+	sf, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sf.Close()
+	df, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(df, sf); err != nil {
+		df.Close()
+		return err
+	}
+	return df.Close()
+}
 
 type Service struct{ db *sql.DB }
 type Result struct {
@@ -53,27 +94,47 @@ func (s *Service) EnsureSchema() {
 	s.db.Exec(`CREATE TABLE IF NOT EXISTS node_connectivity (node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, status TEXT NOT NULL, latency_ms INTEGER, last_error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)`)
 }
 func (s *Service) KernelStatus() KernelStatus {
-	st := KernelStatus{OK: true, Path: KernelBin, Mode: "sing-box+proxy", Kernel: "sing-box"}
-	if _, err := os.Stat(KernelBin); err == nil {
+	st := KernelStatus{OK: true, Path: MihomoBin, Mode: "mihomo+proxy", Kernel: "mihomo"}
+	if _, err := os.Stat(MihomoBin); err == nil {
 		st.Installed = true
-		out, _ := exec.Command(KernelBin, "version").CombinedOutput()
+		out, _ := exec.Command(MihomoBin, "-v").CombinedOutput()
 		st.Version = strings.TrimSpace(string(out))
 	}
 	return st
 }
 func (s *Service) InstallKernel() (string, error) {
+	// Prefer an already staged Mihomo binary. This keeps install deterministic on
+	// hosts where we manually provide a compatible build.
+	for _, cand := range []string{"/tmp/mihomo-home-compatible", "/tmp/mihomo-home-runner"} {
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			if err := os.MkdirAll(KernelTmp, 0755); err != nil {
+				return "", err
+			}
+			tmp := filepath.Join(KernelTmp, "mihomo.new")
+			if err := copyFile(cand, tmp, 0755); err != nil {
+				return "", err
+			}
+			if err := moveFile(tmp, MihomoBin); err != nil {
+				return "", err
+			}
+			_ = os.Chmod(MihomoBin, 0755)
+			out, err := exec.Command(MihomoBin, "-v").CombinedOutput()
+			if err != nil {
+				return "", fmt.Errorf("verify failed: %s", strings.TrimSpace(string(out)))
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+	}
+
 	if runtime.GOOS != "linux" {
 		return "", errors.New("auto install currently supports linux")
 	}
 	arch := runtime.GOARCH
+	assetNeedle := "linux-" + arch
 	if arch == "amd64" {
-		arch = "amd64"
-	} else if arch == "arm64" {
-		arch = "arm64"
-	} else {
-		return "", fmt.Errorf("unsupported arch %s", runtime.GOARCH)
+		assetNeedle = "linux-amd64-compatible"
 	}
-	req, _ := http.NewRequest("GET", "https://api.github.com/repos/SagerNet/sing-box/releases/latest", nil)
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest", nil)
 	req.Header.Set("User-Agent", "subgo")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -93,16 +154,15 @@ func (s *Service) InstallKernel() (string, error) {
 		return "", err
 	}
 	var assetURL string
-	needle := "linux-" + arch
 	for _, a := range rel.Assets {
 		n := strings.ToLower(a.Name)
-		if strings.Contains(n, "sing-box") && strings.Contains(n, needle) && strings.HasSuffix(n, ".tar.gz") && !strings.Contains(n, "android") {
+		if strings.Contains(n, "mihomo") && strings.Contains(n, assetNeedle) && (strings.HasSuffix(n, ".gz") || strings.HasSuffix(n, ".tar.gz")) && !strings.Contains(n, "android") {
 			assetURL = a.URL
 			break
 		}
 	}
 	if assetURL == "" {
-		return "", fmt.Errorf("no sing-box %s tar.gz asset found", needle)
+		return "", fmt.Errorf("no mihomo %s gz asset found", assetNeedle)
 	}
 	r, err := http.Get(assetURL)
 	if err != nil {
@@ -112,59 +172,41 @@ func (s *Service) InstallKernel() (string, error) {
 	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		return "", fmt.Errorf("download HTTP %d", r.StatusCode)
 	}
+	if err := os.MkdirAll(KernelTmp, 0755); err != nil {
+		return "", err
+	}
+	tmp := filepath.Join(KernelTmp, "mihomo.new")
 	gz, err := gzip.NewReader(r.Body)
 	if err != nil {
 		return "", err
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
-	if err := os.MkdirAll(KernelTmp, 0755); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
 		return "", err
 	}
-	tmp := filepath.Join(KernelTmp, "sing-box.new")
-	found := false
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-		if filepath.Base(h.Name) != "sing-box" {
-			continue
-		}
-		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-		if err != nil {
-			return "", err
-		}
-		if _, err := io.Copy(f, tr); err != nil {
-			f.Close()
-			return "", err
-		}
+	if _, err := io.Copy(f, gz); err != nil {
 		f.Close()
-		found = true
-		break
-	}
-	if !found {
-		return "", errors.New("sing-box binary not found in archive")
-	}
-	if err := os.Rename(tmp, KernelBin); err != nil {
 		return "", err
 	}
-	_ = os.Chmod(KernelBin, 0755)
-	out, err := exec.Command(KernelBin, "version").CombinedOutput()
+	f.Close()
+	if err := moveFile(tmp, MihomoBin); err != nil {
+		return "", err
+	}
+	_ = os.Chmod(MihomoBin, 0755)
+	out, err := exec.Command(MihomoBin, "-v").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("verify failed: %s", strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 func (s *Service) UninstallKernel() error {
-	if _, err := os.Stat(KernelBin); err == nil {
-		return os.Remove(KernelBin)
+	if _, err := os.Stat(MihomoBin); err == nil {
+		return os.Remove(MihomoBin)
 	}
 	return nil
 }
+
 func (s *Service) List() ([]Result, error) {
 	s.EnsureSchema()
 	rows, err := s.db.Query(`SELECT node_id,status,latency_ms,last_error,checked_at FROM node_connectivity ORDER BY checked_at DESC`)
@@ -208,7 +250,7 @@ func (s *Service) Check(limit int) ([]Result, error) {
 	}
 	var res []Result
 	for _, j := range jobs {
-		r := s.checkWithSingBox(j.id, j.raw)
+		r := s.checkWithMihomo(j.id, j.raw, time.Now().UTC().Format(time.RFC3339))
 		res = append(res, r)
 		s.save(r)
 	}
@@ -226,7 +268,7 @@ func (s *Service) checkWithSingBox(id int64, raw string) Result {
 			return s.checkWithMihomo(id, raw, now)
 		}
 	}
-	if _, err := os.Stat(KernelBin); err != nil {
+	if _, err := os.Stat(LegacySingBoxBin); err != nil {
 		return s.tcpCheck(id, raw, now)
 	}
 
@@ -247,7 +289,7 @@ func (s *Service) checkWithSingBox(id int64, raw string) Result {
 	// Validate config
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	checkCmd := exec.CommandContext(ctx, KernelBin, "check", "-c", cfgPath)
+	checkCmd := exec.CommandContext(ctx, LegacySingBoxBin, "check", "-c", cfgPath)
 	if out, err2 := checkCmd.CombinedOutput(); err2 != nil {
 		return Result{NodeID: id, Status: "unknown", LastError: fmt.Sprintf("config: %s", trimLine(string(out))), CheckedAt: now}
 	}
@@ -255,7 +297,7 @@ func (s *Service) checkWithSingBox(id int64, raw string) Result {
 	// Start sing-box
 	runCtx, runCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer runCancel()
-	cmd := exec.CommandContext(runCtx, KernelBin, "run", "-c", cfgPath)
+	cmd := exec.CommandContext(runCtx, LegacySingBoxBin, "run", "-c", cfgPath)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
@@ -302,6 +344,9 @@ func (s *Service) checkWithSingBox(id int64, raw string) Result {
 }
 
 func (s *Service) checkWithMihomo(id int64, raw string, now string) Result {
+	if _, err := os.Stat(MihomoBin); err != nil {
+		return Result{NodeID: id, Status: "unknown", LastError: "mihomo not installed", CheckedAt: now}
+	}
 	proxies := []map[string]any{subconv.ClashProxy(raw)}
 	if len(proxies) == 0 || proxies[0] == nil {
 		return Result{NodeID: id, Status: "unknown", LastError: "mihomo: unsupported or malformed proxy", CheckedAt: now}
