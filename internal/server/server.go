@@ -136,6 +136,10 @@ func (s *Server) routes() {
 	s.router.Any("/panel-proxy/:sourceId/*path", s.panelProxy)
 	s.router.GET("/sub/:token/clash", s.subClash)
 	s.router.GET("/api/sub/:token/clash", s.subClash)
+	// Bridge endpoint for panel-side one-click onboarding (sui-go/sui-sub style).
+	// Deliberately outside the browser-session auth group: it performs its own
+	// username/password check so CLI/API callers without a session cookie work.
+	s.router.POST("/api/bridge/push-source", s.bridgePushSource)
 
 	api := s.router.Group("/api", s.requireAuth())
 	api.GET("/admin/user", s.adminUser)
@@ -164,7 +168,6 @@ func (s *Server) routes() {
 	api.POST("/kernel/install", s.kernelInstall)
 	api.POST("/kernel/uninstall", s.kernelUninstall)
 	api.GET("/bridge/e2ee-meta", s.bridgeMeta)
-	api.POST("/bridge/push-source", s.bridgePushSource)
 	api.GET("/nodes", s.listNodes)
 	api.POST("/local-nodes", s.createLocalNode)
 	api.POST("/nodes/:id/toggle", s.toggleNode)
@@ -420,7 +423,48 @@ func (s *Server) bridgeMeta(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true, "enabled": false, "message": "bridge E2EE push is pending"})
 }
 func (s *Server) bridgePushSource(c *gin.Context) {
-	c.JSON(501, gin.H{"ok": false, "error": "bridge push-source is pending"})
+	var req struct {
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		Name       string `json:"name"`
+		PanelURL   string `json:"panel_url"`
+		PanelToken string `json:"panel_token"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "bad json"})
+		return
+	}
+	if _, err := s.auth.Login(strings.TrimSpace(req.Username), req.Password); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "error": "invalid credentials"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "sui-go"
+	}
+	panelURL := strings.TrimSpace(req.PanelURL)
+	token := strings.TrimSpace(req.PanelToken)
+	if panelURL == "" || token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "panel_url / panel_token required"})
+		return
+	}
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM sources WHERE source_type!='local' AND panel_url=? LIMIT 1`, panelURL).Scan(&id)
+	if err == nil && id > 0 {
+		if err := s.sourceSvc.Update(id, name, panelURL, token, true); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+	} else {
+		src, err := s.sourceSvc.Create(name, "sui_api", panelURL, token)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		id = src.ID
+	}
+	go func(sid int64) { _ = s.sourceSvc.Sync(sid) }(id)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "source_id": id, "name": name})
 }
 
 func (s *Server) listNodes(c *gin.Context) {
