@@ -568,7 +568,11 @@ func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, e
 		return s.SbuiJSON(src, "/api/v1/quick/reality", "POST", map[string]any{"remark": remark})
 	}
 	if src.Type == "sui_api" {
-		return s.SuiJSON(src, "/api/inbounds/add-reality-quick", "POST", map[string]any{"remark": remark})
+		res, err := s.SuiJSON(src, "/api/inbounds/add-reality-quick", "POST", map[string]any{"remark": remark})
+		if err == nil {
+			s.SuiJSON(src, "/api/xray/apply", "POST", nil)
+		}
+		return res, err
 	}
 	if src.Type == "xui" || src.Type == "3x_ui" {
 		return s.xuiRealityQuick(src, remark)
