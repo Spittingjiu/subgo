@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -218,6 +219,10 @@ func (s *Service) SyncAll() map[int64]string {
 	}
 	return out
 }
+// errEmptyFetch marks a sync that returned no usable links while the source
+// still has nodes. It is never allowed to delete data.
+var errEmptyFetch = errors.New("upstream returned no links")
+
 func (s *Service) Sync(id int64) error {
 	src, err := s.Get(id)
 	if err != nil {
@@ -225,13 +230,6 @@ func (s *Service) Sync(id int64) error {
 	}
 	if src.Type == "local" {
 		return nil
-	}
-	links, err := s.fetchLinks(src)
-	status := "ok"
-	if err != nil {
-		status = err.Error()
-	} else {
-		status = fmt.Sprintf("ok (%d nodes)", len(links))
 	}
 	flavor := src.SUIFlavor
 	if src.Type == "sui_api" {
@@ -243,11 +241,35 @@ func (s *Service) Sync(id int64) error {
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = s.db.Exec(`UPDATE sources SET last_sync_at=?,last_sync_status=?,sui_flavor=?,updated_at=? WHERE id=?`, now, status, flavor, now, id)
+
+	links, err := s.fetchLinks(src)
 	if err != nil {
+		s.setSyncStatus(id, now, err.Error(), flavor)
 		return err
 	}
-	return s.upsertNodes(id, links)
+	if err := s.upsertNodes(id, links); err != nil {
+		if errors.Is(err, errEmptyFetch) {
+			kept := s.countNodes(id)
+			msg := fmt.Sprintf("empty upstream result, kept %d existing node(s)", kept)
+			s.setSyncStatus(id, now, msg, flavor)
+			log.Printf("[source-sync] source %d (%s) returned no links; kept %d existing node(s) untouched", id, src.Name, kept)
+			return err
+		}
+		s.setSyncStatus(id, now, err.Error(), flavor)
+		return err
+	}
+	s.setSyncStatus(id, now, fmt.Sprintf("ok (%d nodes)", len(links)), flavor)
+	return nil
+}
+
+func (s *Service) setSyncStatus(id int64, now, status, flavor string) {
+	_, _ = s.db.Exec(`UPDATE sources SET last_sync_at=?,last_sync_status=?,sui_flavor=?,updated_at=? WHERE id=?`, now, status, flavor, now, id)
+}
+
+func (s *Service) countNodes(sourceID int64) int {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE source_id=?`, sourceID).Scan(&n)
+	return n
 }
 func (s *Service) fetchLinks(src Source) ([]string, error) {
 	switch src.Type {
@@ -466,13 +488,16 @@ func (s *Service) fetchSubURL(raw, token string) ([]string, error) {
 	return subconv.ParseSubscriptionText(string(b)), nil
 }
 func (s *Service) upsertNodes(sourceID int64, links []string) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
-	seen := make(map[string]struct{})
+	type incoming struct {
+		raw      string
+		hash     string
+		identity string
+		name     string
+		protocol string
+	}
+	list := make([]incoming, 0, len(links))
+	seen := make(map[string]struct{}, len(links))
 	for _, raw := range links {
 		// Skip non-link garbage (HTML/JS/etc). 3x-ui Reality/ML-DSA links can be
 		// very long because mldsa65Verify is embedded in the URL, so keep the
@@ -482,50 +507,193 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 		}
 		p := subconv.ParseRawLink(raw)
 		h := subconv.StableHash(raw)
+		if _, dup := seen[h]; dup {
+			continue
+		}
 		seen[h] = struct{}{}
-		var exists int64
-		_ = tx.QueryRow(`SELECT id FROM nodes WHERE node_hash=?`, h).Scan(&exists)
-		if exists > 0 {
-			_, err = tx.Exec(`UPDATE nodes SET source_id=?,raw_link=?,node_name=?,protocol=?,updated_at=? WHERE id=?`, sourceID, raw, p.Name, p.Protocol, now, exists)
-		} else {
-			var next int64
-			_ = tx.QueryRow(`SELECT COUNT(*)+1 FROM nodes WHERE source_id=?`, sourceID).Scan(&next)
-			disp := fmt.Sprintf("S%d-%03d", sourceID, next)
-			_, err = tx.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)`, sourceID, disp, h, raw, p.Name, p.Protocol, now, now)
-		}
-		if err != nil {
-			return err
-		}
+		list = append(list, incoming{raw: raw, hash: h, identity: subconv.NodeIdentity(raw), name: p.Name, protocol: p.Protocol})
 	}
-	rows, err := tx.Query(`SELECT id,node_hash FROM nodes WHERE source_id=?`, sourceID)
+
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	type staleNode struct {
-		id   int64
-		hash string
+	defer tx.Rollback()
+
+	// An empty upstream answer (panel hiccup, expired token, login page, timeout)
+	// must never wipe nodes or subscription selections.
+	if len(list) == 0 {
+		var existing int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM nodes WHERE source_id=?`, sourceID).Scan(&existing); err != nil {
+			return err
+		}
+		if existing > 0 {
+			return errEmptyFetch
+		}
+		return nil
 	}
-	var stale []staleNode
+
+	type existingNode struct {
+		id           int64
+		hash         string
+		identity     string
+		raw          string
+		missingSince string
+	}
+	rows, err := tx.Query(`SELECT id,node_hash,COALESCE(identity,''),raw_link,COALESCE(missing_since,'') FROM nodes WHERE source_id=?`, sourceID)
+	if err != nil {
+		return err
+	}
+	byHash := map[string]existingNode{}
+	byIdentity := map[string][]existingNode{}
 	for rows.Next() {
-		var id int64
-		var h string
-		if err := rows.Scan(&id, &h); err != nil {
+		var e existingNode
+		if err := rows.Scan(&e.id, &e.hash, &e.identity, &e.raw, &e.missingSince); err != nil {
 			rows.Close()
 			return err
 		}
-		if _, ok := seen[h]; !ok {
-			stale = append(stale, staleNode{id: id, hash: h})
+		if e.identity == "" {
+			e.identity = subconv.NodeIdentity(e.raw)
+		}
+		byHash[e.hash] = e
+		if e.identity != "" {
+			byIdentity[e.identity] = append(byIdentity[e.identity], e)
 		}
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	for _, n := range stale {
-		if _, err := tx.Exec(`DELETE FROM nodes WHERE id=? AND source_id=?`, n.id, sourceID); err != nil {
+
+	matched := make(map[int64]struct{}, len(list))
+	for _, in := range list {
+		if e, ok := byHash[in.hash]; ok {
+			if _, err := tx.Exec(`UPDATE nodes SET source_id=?,raw_link=?,node_name=?,protocol=?,identity=?,missing_since='',updated_at=? WHERE id=?`, sourceID, in.raw, in.name, in.protocol, in.identity, now, e.id); err != nil {
+				return err
+			}
+			matched[e.id] = struct{}{}
+			continue
+		}
+		// Same physical node (protocol+host+port) but a regenerated link: keep the
+		// row and carry every subscription selection over to the new hash instead
+		// of deleting the node and pruning it out of subscriptions.
+		if in.identity != "" {
+			reused := false
+			for _, e := range byIdentity[in.identity] {
+				if _, taken := matched[e.id]; taken {
+					continue
+				}
+				if _, err := tx.Exec(`UPDATE nodes SET source_id=?,raw_link=?,node_name=?,protocol=?,node_hash=?,identity=?,missing_since='',updated_at=? WHERE id=?`, sourceID, in.raw, in.name, in.protocol, in.hash, in.identity, now, e.id); err != nil {
+					return err
+				}
+				if err := rewriteSubHashes(tx, e.hash, in.hash); err != nil {
+					return err
+				}
+				matched[e.id] = struct{}{}
+				reused = true
+				log.Printf("[source-sync] source %d node %s regenerated its link, kept row %d and re-linked subscriptions", sourceID, shortHash(e.hash), e.id)
+				break
+			}
+			if reused {
+				continue
+			}
+		}
+		var next int64
+		_ = tx.QueryRow(`SELECT COUNT(*)+1 FROM nodes WHERE source_id=?`, sourceID).Scan(&next)
+		disp := fmt.Sprintf("S%d-%03d", sourceID, next)
+		if _, err := tx.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,identity,missing_since,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,'',?,?)`, sourceID, disp, in.hash, in.raw, in.name, in.protocol, in.identity, now, now); err != nil {
 			return err
 		}
 	}
+
+	// Nodes that vanished from the upstream answer start a grace period instead of
+	// being deleted immediately: a single bad sync no longer removes a node (and
+	// therefore no longer kicks it out of subscriptions).
+	for _, e := range byHash {
+		if _, ok := matched[e.id]; ok {
+			continue
+		}
+		if e.missingSince == "" {
+			if _, err := tx.Exec(`UPDATE nodes SET missing_since=?,updated_at=? WHERE id=?`, now, now, e.id); err != nil {
+				return err
+			}
+			log.Printf("[source-sync] source %d node %s missing upstream, grace period started", sourceID, shortHash(e.hash))
+			continue
+		}
+		since, perr := time.Parse(time.RFC3339, e.missingSince)
+		if perr != nil || time.Since(since) < nodeMissingGrace {
+			continue
+		}
+		if _, err := tx.Exec(`DELETE FROM nodes WHERE id=? AND source_id=?`, e.id, sourceID); err != nil {
+			return err
+		}
+		log.Printf("[source-sync] source %d node %s missing for %s, removed", sourceID, shortHash(e.hash), nodeMissingGrace)
+	}
 	return tx.Commit()
+}
+
+// nodeMissingGrace is how long a node may be absent from the upstream answer
+// before it is really deleted.
+const nodeMissingGrace = 20 * time.Minute
+
+func shortHash(h string) string {
+	if len(h) > 8 {
+		return h[:8]
+	}
+	return h
+}
+
+// rewriteSubHashes moves subscription selections from an old node hash to a new
+// one so a regenerated upstream link cannot silently drop a node from a
+// subscription.
+func rewriteSubHashes(tx *sql.Tx, oldHash, newHash string) error {
+	if oldHash == "" || newHash == "" || oldHash == newHash {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT id,node_ids_json FROM subscriptions`)
+	if err != nil {
+		return err
+	}
+	type subRow struct {
+		id   int64
+		blob string
+	}
+	var subs []subRow
+	for rows.Next() {
+		var sr subRow
+		if err := rows.Scan(&sr.id, &sr.blob); err != nil {
+			rows.Close()
+			return err
+		}
+		subs = append(subs, sr)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, sr := range subs {
+		var hashes []string
+		if err := json.Unmarshal([]byte(sr.blob), &hashes); err != nil {
+			continue
+		}
+		changed := false
+		for i, h := range hashes {
+			if h == oldHash {
+				hashes[i] = newHash
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		blob, err := json.Marshal(hashes)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE subscriptions SET node_ids_json=?,updated_at=? WHERE id=?`, string(blob), now, sr.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) Inbounds(sourceID int64) ([]Inbound, error) {

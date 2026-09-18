@@ -10,6 +10,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Spittingjiu/subgo/internal/subconv"
 )
 
 type DB struct{ *sql.DB }
@@ -60,7 +62,54 @@ func (d *DB) Migrate() error {
 	if err := d.addColumnIfMissing("sources", "sui_flavor", `ALTER TABLE sources ADD COLUMN sui_flavor TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := d.addColumnIfMissing("nodes", "identity", `ALTER TABLE nodes ADD COLUMN identity TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := d.addColumnIfMissing("nodes", "missing_since", `ALTER TABLE nodes ADD COLUMN missing_since TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err := d.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_identity ON nodes(source_id, identity)`); err != nil {
+		return err
+	}
+	if err := d.backfillNodeIdentity(); err != nil {
+		return err
+	}
 	return d.ensureDefaults()
+}
+
+// backfillNodeIdentity fills nodes.identity for rows created before the column
+// existed, so link-refresh detection works on existing data too.
+func (d *DB) backfillNodeIdentity() error {
+	rows, err := d.Query(`SELECT id, raw_link FROM nodes WHERE COALESCE(identity,'')=''`)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		id  int64
+		raw string
+	}
+	var todo []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.raw); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, r)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, r := range todo {
+		id := subconv.NodeIdentity(r.raw)
+		if id == "" {
+			continue
+		}
+		if _, err := d.Exec(`UPDATE nodes SET identity=? WHERE id=?`, id, r.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *DB) addColumnIfMissing(table, column, stmt string) error {

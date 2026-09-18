@@ -87,6 +87,20 @@ func WithName(raw, name string) string {
 	return u.String()
 }
 
+// NodeIdentity returns a coarse identity key for a link: protocol + host + port.
+// Unlike node_hash (which covers every connection parameter), this survives
+// upstream rotations of uuid/password, REALITY key pairs, short ids, flow flags
+// and display names. It lets subgo keep the same node row - and therefore every
+// subscription entry that points at it - when a panel regenerates its link.
+func NodeIdentity(raw string) string {
+	p := ParseRawLink(strings.TrimSpace(raw))
+	host := strings.ToLower(strings.TrimSpace(p.Host))
+	if host == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s|%s|%d", strings.ToLower(p.Protocol), host, p.Port)
+}
+
 func ParseSubscriptionText(text string) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
