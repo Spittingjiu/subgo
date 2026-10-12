@@ -377,9 +377,10 @@ func (s *Server) suiRealityQuick(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
 	var req struct {
 		Remark string `json:"remark"`
+		Port   int    `json:"port"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	v, err := s.sourceSvc.RealityQuick(id, req.Remark)
+	v, err := s.sourceSvc.RealityQuick(id, req.Remark, req.Port)
 	if err == nil {
 		s.audit("reality_quick", "source", strconv.FormatInt(id, 10), req.Remark)
 		_ = s.sourceSvc.Sync(id)

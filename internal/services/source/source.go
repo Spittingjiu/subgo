@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -219,6 +220,7 @@ func (s *Service) SyncAll() map[int64]string {
 	}
 	return out
 }
+
 // errEmptyFetch marks a sync that returned no usable links while the source
 // still has nodes. It is never allowed to delete data.
 var errEmptyFetch = errors.New("upstream returned no links")
@@ -724,7 +726,7 @@ func (s *Service) Inbounds(sourceID int64) ([]Inbound, error) {
 		return nil, errors.New("only sui_api/sbui/3x-ui source supports inbounds")
 	}
 }
-func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, error) {
+func (s *Service) RealityQuick(sourceID int64, remark string, wantPort int) (map[string]any, error) {
 	src, err := s.Get(sourceID)
 	if err != nil {
 		return nil, err
@@ -733,44 +735,78 @@ func (s *Service) RealityQuick(sourceID int64, remark string) (map[string]any, e
 		remark = fmt.Sprintf("quick-%d", time.Now().Unix())
 	}
 	if src.Type == "sbui" {
-		return s.SbuiJSON(src, "/api/v1/quick/reality", "POST", map[string]any{"remark": remark})
+		body := map[string]any{"remark": remark}
+		if wantPort > 0 {
+			body["port"] = wantPort
+		}
+		return s.SbuiJSON(src, "/api/v1/quick/reality", "POST", body)
 	}
 	if src.Type == "sui_api" {
-		res, err := s.SuiJSON(src, "/api/inbounds/add-reality-quick", "POST", map[string]any{"remark": remark})
+		port := wantPort
+		if port <= 0 {
+			port = pickRandomPort(10000, 60000, s.usedPorts(sourceID))
+		}
+		body := map[string]any{"remark": remark}
+		if port > 0 {
+			body["port"] = port
+		}
+		res, err := s.SuiJSON(src, "/api/inbounds/add-reality-quick", "POST", body)
 		if err == nil {
 			s.SuiJSON(src, "/api/xray/apply", "POST", nil)
 		}
 		return res, err
 	}
 	if src.Type == "xui" || src.Type == "3x_ui" {
-		return s.xuiRealityQuick(src, remark)
+		return s.xuiRealityQuick(src, remark, wantPort)
 	}
 	return nil, errors.New("only sui_api/sbui/3x-ui source supports reality quick")
 }
 
-func (s *Service) xuiRealityQuick(src Source, remark string) (map[string]any, error) {
-	port := int64(20000)
-	if arr, err := s.Inbounds(src.ID); err == nil {
-		used := map[int64]struct{}{}
-		maxPort := int64(19999)
+// usedPorts 返回某源当前已占用的端口集合（用于分配新节点时避让）。
+func (s *Service) usedPorts(sourceID int64) map[int]bool {
+	used := map[int]bool{}
+	if arr, err := s.Inbounds(sourceID); err == nil {
 		for _, inb := range arr {
-			p := toInt64(inb.Port)
-			if p > 0 {
-				used[p] = struct{}{}
-				if p > maxPort {
-					maxPort = p
-				}
+			if p := int(toInt64(inb.Port)); p > 0 {
+				used[p] = true
 			}
 		}
-		for p := maxPort + 1; p < maxPort+2000; p++ {
-			if p < 20000 {
-				continue
-			}
-			if _, ok := used[p]; !ok {
-				port = p
-				break
-			}
+	}
+	return used
+}
+
+// pickRandomPort 在 [lo,hi] 内随机挑一个未占用端口；全满则返回 0。
+func pickRandomPort(lo, hi int, used map[int]bool) int {
+	if lo <= 0 {
+		lo = 10000
+	}
+	if hi <= 0 || hi > 65535 {
+		hi = 60000
+	}
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	span := hi - lo + 1
+	if span <= 0 {
+		return 0
+	}
+	start := lo + mrand.Intn(span)
+	for i := 0; i < span; i++ {
+		p := lo + (start-lo+i)%span
+		if !used[p] {
+			return p
 		}
+	}
+	return 0
+}
+
+func (s *Service) xuiRealityQuick(src Source, remark string, wantPort int) (map[string]any, error) {
+	port := int64(wantPort)
+	if port <= 0 {
+		port = int64(pickRandomPort(10000, 60000, s.usedPorts(src.ID)))
+	}
+	if port <= 0 {
+		port = 20000
 	}
 	uuid, err := randomUUID()
 	if err != nil {
