@@ -21,7 +21,8 @@ type Service struct {
 }
 
 type Admin struct {
-	Username string `json:"username"`
+	Username         string `json:"username"`
+	LogRetentionDays int    `json:"log_retention_days"`
 }
 
 func New(db *sql.DB, secret string) *Service {
@@ -84,9 +85,24 @@ func (s *Service) Verify(token string) (string, bool) {
 }
 
 func (s *Service) Admin() (Admin, error) {
-	var u string
-	err := s.db.QueryRow(`SELECT username FROM admin_settings WHERE id=1`).Scan(&u)
-	return Admin{Username: u}, err
+	var a Admin
+	err := s.db.QueryRow(`SELECT username, COALESCE(log_retention_days,30) FROM admin_settings WHERE id=1`).Scan(&a.Username, &a.LogRetentionDays)
+	return a, err
+}
+
+// SetLogRetention stores how many days of logs the panel keeps. 0 keeps
+// everything; the upper bound exists so a typo cannot ask for a cutoff
+// decades away and silently delete every row.
+func (s *Service) SetLogRetention(days int) error {
+	if days < 0 {
+		days = 0
+	}
+	if days > 3650 {
+		days = 3650
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(`UPDATE admin_settings SET log_retention_days=?, updated_at=? WHERE id=1`, days, now)
+	return err
 }
 
 func (s *Service) UpdateAdmin(username, password string) error {

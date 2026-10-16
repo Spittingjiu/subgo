@@ -22,6 +22,7 @@ import (
 	"github.com/Spittingjiu/subgo/internal/models"
 	"github.com/Spittingjiu/subgo/internal/services/auth"
 	"github.com/Spittingjiu/subgo/internal/services/connectivity"
+	"github.com/Spittingjiu/subgo/internal/services/logs"
 	"github.com/Spittingjiu/subgo/internal/services/node"
 	"github.com/Spittingjiu/subgo/internal/services/source"
 	"github.com/Spittingjiu/subgo/internal/services/subscription"
@@ -39,6 +40,7 @@ type Server struct {
 	subs         *subscription.Service
 	sourceSvc    *source.Service
 	conn         *connectivity.Service
+	logs         *logs.Service
 	router       *gin.Engine
 	templateData []byte
 	templateMu   sync.RWMutex
@@ -53,8 +55,14 @@ func New(cfg config.Config) (*Server, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery(), requestID(), accessHeaders())
-	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), router: r}
+	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), logs: logs.New(database.DB), router: r}
+	// Mirror the process log into the panel's 运行日志, so failures that used to
+	// reach only journald (template refresh, source sync) are visible in the UI.
+	log.SetOutput(io.MultiWriter(os.Stderr, s.logs.Sink()))
+	r.Use(s.auditMutations())
+	s.logs.Info("app", "服务启动 subgo "+Version)
 	s.routes()
+	go s.pruneLogsScheduler()
 	// Migrate existing subscriptions from integer node IDs to stable node_hash strings.
 	if n, err := s.migrateSubNodeIDsToHashes(); err != nil {
 		log.Printf("[migration] node_ids→node_hashes error: %v", err)
@@ -90,6 +98,32 @@ func (s *Server) sourceSyncScheduler() {
 	}
 }
 
+// pruneLogsScheduler enforces the panel's 保留天数 setting: once at startup so
+// a change takes effect immediately, then every six hours.
+func (s *Server) pruneLogsScheduler() {
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for {
+		s.pruneLogsOnce()
+		<-ticker.C
+	}
+}
+
+func (s *Server) pruneLogsOnce() {
+	admin, err := s.auth.Admin()
+	if err != nil || admin.LogRetentionDays <= 0 {
+		return
+	}
+	n, err := s.logs.Prune(admin.LogRetentionDays)
+	if err != nil {
+		log.Printf("[logs] prune failed: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[logs] pruned %d entries older than %d days", n, admin.LogRetentionDays)
+	}
+}
+
 func (s *Server) runSourceSyncAll(reason string) (map[int64]string, bool) {
 	if !s.sourceSyncMu.TryLock() {
 		return map[int64]string{-1: "source sync already running"}, false
@@ -110,6 +144,9 @@ func (s *Server) runSourceSyncAll(reason string) (map[int64]string, bool) {
 func (s *Server) Handler() http.Handler { return s.router }
 func (s *Server) Run() error            { return http.ListenAndServe(s.cfg.Addr, s.router) }
 func (s *Server) Close() error {
+	if s.logs != nil {
+		s.logs.Stop()
+	}
 	if s.db != nil {
 		return s.db.Close()
 	}
@@ -153,8 +190,12 @@ func (s *Server) routes() {
 	api.GET("/nodes/connectivity", s.connectivityList)
 	api.POST("/nodes/connectivity/check", s.connectivityCheck)
 	api.POST("/admin/connectivity/run-now", s.connectivityCheck)
-	api.GET("/admin/subscription-logs", s.subscriptionLogs)
-	api.GET("/admin/audit-logs", s.auditLogs)
+	// 日志中心: the runtime log, subscription access and the privileged-action
+	// audit trail behind one filter/pager surface.
+	api.GET("/admin/logs", s.adminLogs)
+	api.GET("/admin/logs/stats", s.adminLogStats)
+	api.GET("/admin/logs/export", s.adminLogsExport)
+	api.POST("/admin/logs/clear", s.adminLogsClear)
 	api.GET("/view/home", s.viewHome)
 	api.GET("/view/nodes", s.listNodes)
 	api.GET("/view/bootstrap", s.viewBootstrap)
@@ -187,10 +228,12 @@ func (s *Server) login(c *gin.Context) {
 	}
 	tok, err := s.auth.Login(req.Username, req.Password)
 	if err != nil {
+		s.logs.Warn("auth", "登录失败：用户名 "+req.Username+" · ip="+c.ClientIP())
 		c.JSON(401, gin.H{"ok": false, "error": "invalid credentials"})
 		return
 	}
 	http.SetCookie(c.Writer, &http.Cookie{Name: "subgo_session", Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 7 * 24 * 3600, Secure: isHTTPS(c)})
+	s.audit("登录成功", "管理员", req.Username, "ip="+c.ClientIP())
 	c.JSON(200, gin.H{"ok": true, "username": req.Username})
 }
 func (s *Server) logout(c *gin.Context) {
@@ -205,14 +248,53 @@ func (s *Server) me(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"ok": true, "username": u})
 }
-func (s *Server) adminUser(c *gin.Context) { a, err := s.auth.Admin(); jsonResult(c, a, err) }
+func (s *Server) adminUser(c *gin.Context) {
+	a, err := s.auth.Admin()
+	if err != nil {
+		c.JSON(errStatus(err), gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "username": a.Username, "log_retention_days": a.LogRetentionDays})
+}
+
+// updateAdminUser takes a partial update: an empty username and an empty
+// password both mean "leave it alone", so the 日志中心 retention control can
+// save itself without resending the whole form.
 func (s *Server) updateAdminUser(c *gin.Context) {
-	var req struct{ Username, Password string }
+	var req struct {
+		Username         string `json:"username"`
+		Password         string `json:"password"`
+		LogRetentionDays *int   `json:"log_retention_days"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	jsonOK(c, s.auth.UpdateAdmin(req.Username, req.Password))
+	cur, err := s.auth.Admin()
+	if err != nil {
+		jsonOK(c, err)
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	if username == "" {
+		username = cur.Username
+	}
+	if err := s.auth.UpdateAdmin(username, req.Password); err != nil {
+		jsonOK(c, err)
+		return
+	}
+	if req.LogRetentionDays != nil {
+		if err := s.auth.SetLogRetention(*req.LogRetentionDays); err != nil {
+			jsonOK(c, err)
+			return
+		}
+	}
+	a, err := s.auth.Admin()
+	if err != nil {
+		jsonOK(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "username": a.Username, "log_retention_days": a.LogRetentionDays})
 }
 func (s *Server) sources(c *gin.Context) {
 	v, err := s.sourceSvc.List()
@@ -297,41 +379,239 @@ func (s *Server) connectivityCheck(c *gin.Context) {
 	v, err := s.conn.Check(limit)
 	jsonResultKey(c, "results", v, err)
 }
-func (s *Server) subscriptionLogs(c *gin.Context) {
-	rows, err := s.db.Query(`SELECT id,token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at FROM subscription_logs ORDER BY id DESC LIMIT ?`, limitParam(c, 200))
+
+// ---- 日志中心 ------------------------------------------------------------
+//
+// Three kinds of history live here: the service runtime log (system_logs),
+// every subscription fetch (subscription_logs) and every privileged action
+// (audit_logs). They share one query surface so the panel can switch between
+// them with the same filters and pager.
+
+const auditDoneKey = "subgo_audit_done"
+
+// logKindParam tolerates both the panel's short names and the raw kind.
+func logKindParam(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case logs.KindSystem, "runtime", "app", "service":
+		return logs.KindSystem
+	case logs.KindAudit, "operation", "op":
+		return logs.KindAudit
+	default:
+		return logs.KindSubscription
+	}
+}
+
+func logFilter(c *gin.Context) logs.Filter {
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	subscriptionID, _ := strconv.ParseInt(c.Query("subscription_id"), 10, 64)
+	return logs.Filter{
+		Q:              c.Query("q"),
+		Scope:          c.Query("scope"),
+		Level:          c.Query("level"),
+		SubscriptionID: subscriptionID,
+		Limit:          limitParam(c, 100),
+		Offset:         offset,
+	}
+}
+
+func (s *Server) adminLogs(c *gin.Context) {
+	kind := logKindParam(c.Query("kind"))
+	f := logFilter(c)
+	var rows any
+	var total int
+	var err error
+	switch kind {
+	case logs.KindSystem:
+		var v []logs.SystemRow
+		v, total, err = s.logs.System(f)
+		rows = v
+	case logs.KindAudit:
+		var v []logs.AuditRow
+		v, total, err = s.logs.Audits(f)
+		rows = v
+	default:
+		var v []logs.SubscriptionRow
+		v, total, err = s.logs.Subscriptions(f)
+		rows = v
+	}
 	if err != nil {
 		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	defer rows.Close()
-	out := []gin.H{}
-	for rows.Next() {
-		var id, sid int64
-		var token, name, rt, ip, ua, ca string
-		_ = rows.Scan(&id, &token, &sid, &name, &rt, &ip, &ua, &ca)
-		out = append(out, gin.H{"id": id, "token": token, "subscription_id": sid, "subscription_name": name, "route_type": rt, "client_ip": ip, "user_agent": ua, "created_at": ca})
+	c.JSON(200, gin.H{"ok": true, "kind": kind, "rows": rows, "total": total, "limit": f.Limit, "offset": f.Offset})
+}
+
+func (s *Server) adminLogStats(c *gin.Context) {
+	st, err := s.logs.Stats()
+	if err != nil {
+		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
+		return
 	}
-	c.JSON(200, gin.H{"ok": true, "logs": out})
+	scopes, err := s.logs.Scopes()
+	if err != nil {
+		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	days := 0
+	if a, err := s.auth.Admin(); err == nil {
+		days = a.LogRetentionDays
+	}
+	c.JSON(200, gin.H{"ok": true, "stats": st, "scopes": scopes, "retention_days": days})
+}
+
+// adminLogsExport streams CSV instead of JSON so the browser saves the file
+// with exactly the filters the list view is showing.
+func (s *Server) adminLogsExport(c *gin.Context) {
+	kind := logKindParam(c.Query("kind"))
+	name := "subgo-" + kind + "-" + time.Now().UTC().Format("20060102-150405") + ".csv"
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="`+name+`"`)
+	if err := s.logs.Export(kind, logFilter(c), c.Writer); err != nil {
+		_ = c.Error(err)
+	}
+}
+
+func (s *Server) adminLogsClear(c *gin.Context) {
+	var req struct {
+		Kind string `json:"kind"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	kinds := []string{strings.ToLower(strings.TrimSpace(req.Kind))}
+	if kinds[0] == "" || kinds[0] == "all" {
+		kinds = []string{logs.KindSystem, logs.KindSubscription, logs.KindAudit}
+	}
+	var removed int64
+	for _, kind := range kinds {
+		n, err := s.logs.Clear(kind)
+		if err != nil {
+			c.JSON(400, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		removed += n
+	}
+	c.JSON(200, gin.H{"ok": true, "removed": removed})
 }
 
 func (s *Server) audit(action, targetType, targetID, detail string) {
 	_, _ = s.db.Exec(`INSERT INTO audit_logs(action,target_type,target_id,detail,created_at) VALUES(?,?,?,?,?)`, action, targetType, targetID, detail, time.Now().UTC().Format(time.RFC3339))
 }
-func (s *Server) auditLogs(c *gin.Context) {
-	rows, err := s.db.Query(`SELECT id,action,target_type,target_id,detail,created_at FROM audit_logs ORDER BY id DESC LIMIT ?`, limitParam(c, 100))
-	if err != nil {
-		c.JSON(500, gin.H{"ok": false, "error": err.Error()})
-		return
+
+// auditCtx records a bespoke row and marks the request, so auditMutations does
+// not append a second, poorer entry for the same call.
+func (s *Server) auditCtx(c *gin.Context, action, targetType, targetID, detail string) {
+	c.Set(auditDoneKey, true)
+	s.audit(action, targetType, targetID, detail)
+}
+
+// auditMutations records every state-changing API call that succeeded, so 操作
+// 审计 covers the whole panel and not only the handlers that write their own
+// row. Request bodies are never stored: they can carry passwords.
+func (s *Server) auditMutations() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !auditableMutation(c.Request.Method, c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+		c.Next()
+		if c.GetBool(auditDoneKey) {
+			return
+		}
+		status := c.Writer.Status()
+		if status < 200 || status >= 300 {
+			return
+		}
+		action, targetType, targetID := auditDescription(c.Request.Method, c.Request.URL.Path)
+		s.audit(action, targetType, targetID, "HTTP "+c.Request.Method+" "+c.Request.URL.Path+" → "+strconv.Itoa(status)+" · ip="+c.ClientIP())
 	}
-	defer rows.Close()
-	out := []gin.H{}
-	for rows.Next() {
-		var id int64
-		var a, t, tid, d, ca string
-		_ = rows.Scan(&id, &a, &t, &tid, &d, &ca)
-		out = append(out, gin.H{"id": id, "action": a, "target_type": t, "target_id": tid, "detail": d, "created_at": ca})
+}
+
+func auditableMutation(method, path string) bool {
+	if !strings.HasPrefix(path, "/api/") {
+		return false
 	}
-	c.JSON(200, gin.H{"ok": true, "logs": out})
+	// Logins and the panel bridge authenticate themselves; their handlers record
+	// the outcome with more context than a bare path could.
+	if strings.HasPrefix(path, "/api/auth/") || strings.HasPrefix(path, "/api/bridge/") {
+		return false
+	}
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
+// auditLabels maps an API prefix to the object it changes. The longest match
+// wins, so /api/sources/sync-all is not reported as a plain source change.
+var auditLabels = []struct{ prefix, verb, label string }{
+	{"/api/admin/logs/clear", "清空", "日志"},
+	{"/api/admin/logs", "导出", "日志"},
+	{"/api/admin/user", "修改", "用户设置"},
+	{"/api/admin/connectivity", "执行", "连通性扫描"},
+	{"/api/sources/sync-all", "同步", "全部上游源"},
+	{"/api/sources", "", "上游源"},
+	{"/api/subscriptions", "", "订阅"},
+	{"/api/local-nodes", "", "本地节点"},
+	{"/api/nodes/connectivity", "检测", "节点连通性"},
+	{"/api/nodes", "", "节点"},
+	{"/api/kernel", "", "内核"},
+	{"/api/sui", "", "上游面板"},
+}
+
+var mutationVerbs = []struct{ suffix, verb string }{
+	{"/sync-all", "同步"},
+	{"/sync", "同步"},
+	{"/run-now", "执行"},
+	{"/check", "检测"},
+	{"/toggle", "开关"},
+	{"/rename", "改名"},
+	{"/install", "安装"},
+	{"/uninstall", "卸载"},
+	{"/export", "导出"},
+	{"/clear", "清空"},
+}
+
+func auditDescription(method, path string) (action, targetType, targetID string) {
+	verb, label, best := "", "接口", -1
+	for _, l := range auditLabels {
+		if strings.HasPrefix(path, l.prefix) && len(l.prefix) > best {
+			best, verb, label = len(l.prefix), l.verb, l.label
+		}
+	}
+	if verb == "" {
+		verb = mutationVerb(method, path)
+	}
+	return verb + label, label, lastPathID(path)
+}
+
+func mutationVerb(method, path string) string {
+	for _, m := range mutationVerbs {
+		if strings.HasSuffix(path, m.suffix) {
+			return m.verb
+		}
+	}
+	switch method {
+	case http.MethodPost:
+		return "新增"
+	case http.MethodPut, http.MethodPatch:
+		return "更新"
+	case http.MethodDelete:
+		return "删除"
+	}
+	return "变更"
+}
+
+// lastPathID returns a trailing numeric path segment so the audit table can
+// show "#7" instead of repeating the whole URL.
+func lastPathID(path string) string {
+	seg := path[strings.LastIndex(path, "/")+1:]
+	if _, err := strconv.Atoi(seg); err == nil {
+		return seg
+	}
+	return ""
 }
 
 func (s *Server) viewHome(c *gin.Context) {
@@ -381,7 +661,7 @@ func (s *Server) suiRealityQuick(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	v, err := s.sourceSvc.RealityQuick(id, req.Remark, req.Port)
 	if err == nil {
-		s.audit("reality_quick", "source", strconv.FormatInt(id, 10), req.Remark)
+		s.auditCtx(c, "reality_quick", "source", strconv.FormatInt(id, 10), req.Remark)
 		_ = s.sourceSvc.Sync(id)
 	}
 	jsonResultKey(c, "obj", v, err)
@@ -395,7 +675,7 @@ func (s *Server) suiInboundRename(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	err := s.sourceSvc.RenameInbound(sid, iid, req.Remark)
 	if err == nil {
-		s.audit("inbound_rename", "inbound", strconv.FormatInt(iid, 10), req.Remark)
+		s.auditCtx(c, "inbound_rename", "inbound", strconv.FormatInt(iid, 10), req.Remark)
 		_ = s.sourceSvc.Sync(sid)
 	}
 	jsonOK(c, err)
@@ -405,7 +685,7 @@ func (s *Server) suiInboundDelete(c *gin.Context) {
 	iid, _ := strconv.ParseInt(c.Param("inboundId"), 10, 64)
 	err := s.sourceSvc.DeleteInbound(sid, iid)
 	if err == nil {
-		s.audit("inbound_delete", "inbound", strconv.FormatInt(iid, 10), "source="+strconv.FormatInt(sid, 10))
+		s.auditCtx(c, "inbound_delete", "inbound", strconv.FormatInt(iid, 10), "source="+strconv.FormatInt(sid, 10))
 		_ = s.sourceSvc.Sync(sid)
 	}
 	jsonOK(c, err)

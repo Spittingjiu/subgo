@@ -82,9 +82,9 @@
 | 删除订阅 | `DELETE /api/subscriptions/:id` | ✅ | 删除 token |
 | plain 输出 | `/sub/:token`, `/api/sub/:token/plain` | ✅ | 初版 plain 输出可用，streaming writer 后续优化 |
 | Clash/sing-box 输出 | `/sub/:token/clash` | 🟡 | 已支持 vless/hy2/ss/trojan 基础 YAML |
-| 订阅访问日志 | `GET /api/admin/subscription-logs` | ✅ | 初版同步写入，异步后续优化 |
+| 日志中心 | `GET /api/admin/logs` (kind=system/subscription/audit) | ✅ | 运行日志、访问日志、操作审计，支持筛选、分页、CSV 导出、清空与保留天数；替代原 subscription-logs / audit-logs 接口 |
 | 自动裁剪不可用节点 | 字段已存在 | ⬜ | 和连通性检测联动 |
-| 模板支持 | clash template URL | ⬜ | 可后置，先保证内置模板 |
+| 模板支持 | clash template URL | ✅ | 启动与刷新时拉取远程模板并校验，失败则保留上一有效模板并回退内置模板 |
 
 ## 6. 连通性检测与 sing-box 内核
 
@@ -129,7 +129,7 @@
 - ⬜ 上游 credential/token 不进入前端 bootstrap。
 - ⬜ panel proxy 不透传 subgo 自身 cookie 到上游。
 - ⬜ Set-Cookie 改写必须绑定 proxy path/source。
-- ⬜ 删除源、删除 inbound、本地节点删除等写操作需要审计。
+- ✅ 删除源、删除 inbound、本地节点删除等写操作需要审计（auditMutations 中间件记录 /api 下的写操作）。
 - ⬜ 订阅 token 使用高熵随机值。
 
 ## 10. 推荐实施顺序

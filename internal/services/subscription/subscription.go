@@ -83,7 +83,14 @@ func (s *Service) Delete(id int64) error {
 	return err
 }
 
+// PlainLinks renders the plain node list behind /sub/:token.
 func (s *Service) PlainLinks(token, clientIP, ua string) (string, error) {
+	return s.links(token, clientIP, ua, "plain")
+}
+
+// links renders the node list and records the fetch. routeType is what the
+// panel shows in 访问日志, so a Clash fetch is not reported as a plain one.
+func (s *Service) links(token, clientIP, ua, routeType string) (string, error) {
 	sub, err := s.getByToken(token)
 	if err != nil {
 		return "", err
@@ -126,12 +133,12 @@ func (s *Service) PlainLinks(token, clientIP, ua string) (string, error) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = s.db.Exec(`UPDATE subscriptions SET access_count=access_count+1,last_accessed_at=? WHERE id=?`, now, sub.ID)
-	_, _ = s.db.Exec(`INSERT INTO subscription_logs(token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at) VALUES(?,?,?,?,?,?,?)`, token, sub.ID, sub.Name, "plain", clientIP, ua, now)
+	_, _ = s.db.Exec(`INSERT INTO subscription_logs(token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at) VALUES(?,?,?,?,?,?,?)`, token, sub.ID, sub.Name, routeType, clientIP, ua, now)
 	return strings.Join(links, "\n") + "\n", nil
 }
 
 func (s *Service) Clash(token, clientIP, ua string, clashTemplate []byte) (string, error) {
-	plain, err := s.PlainLinks(token, clientIP, ua)
+	plain, err := s.links(token, clientIP, ua, "clash")
 	if err != nil {
 		return "", err
 	}

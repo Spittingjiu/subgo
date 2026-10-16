@@ -50,6 +50,9 @@ func (d *DB) Migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_sub_logs_created ON subscription_logs(created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS system_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL DEFAULT 'info', scope TEXT NOT NULL DEFAULT 'app', message TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_logs_scope ON system_logs(scope, id DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Exec(s); err != nil {
@@ -66,6 +69,13 @@ func (d *DB) Migrate() error {
 		return err
 	}
 	if err := d.addColumnIfMissing("nodes", "missing_since", `ALTER TABLE nodes ADD COLUMN missing_since TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// Log retention is a panel setting; 0 means "keep everything".
+	if err := d.addColumnIfMissing("admin_settings", "log_retention_days", `ALTER TABLE admin_settings ADD COLUMN log_retention_days INTEGER NOT NULL DEFAULT 30`); err != nil {
+		return err
+	}
+	if _, err := d.Exec(`CREATE INDEX IF NOT EXISTS idx_sub_logs_sub ON subscription_logs(subscription_id, id DESC)`); err != nil {
 		return err
 	}
 	if _, err := d.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_identity ON nodes(source_id, identity)`); err != nil {

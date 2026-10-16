@@ -235,15 +235,42 @@
         <div id="connectivityStatus" class="muted" style="margin-top:8px">连通性状态：未加载</div>
       </div>
       <div class="card">
-        <h3>订阅更新日志</h3>
-        <div class="muted" style="margin-bottom:8px">自动刷新，最多保留最近 10 条：更新时间、来源IP、UA与设备识别</div>
-        <div id="subLogs" class="log-box">暂无日志</div>
-      </div>
-      <div class="card">
-        <h3>操作审计</h3>
-        <div class="muted" style="margin:8px 0">记录一键 Reality、上游改名、上游删除等高风险操作。</div>
-        <button onclick="loadAuditLogs()">刷新审计</button>
-        <div id="auditLogs" class="log-box" style="margin-top:10px">暂无审计</div>
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <h3 style="margin:0">日志中心</h3>
+          <div class="row" style="gap:8px">
+            <select id="logRetention" style="max-width:150px">
+              <option value="0">永久保留</option>
+              <option value="7">保留 7 天</option>
+              <option value="30">保留 30 天</option>
+              <option value="90">保留 90 天</option>
+              <option value="365">保留 365 天</option>
+            </select>
+            <button class="btn-small" onclick="saveLogRetention()">保存保留策略</button>
+          </div>
+        </div>
+        <div class="row" style="gap:6px;margin:10px 0">
+          <button id="logKindSystem" class="btn-small ghost" onclick="setLogKind('system')">运行日志</button>
+          <button id="logKindSubscription" class="btn-small ghost" onclick="setLogKind('subscription')">访问日志</button>
+          <button id="logKindAudit" class="btn-small ghost" onclick="setLogKind('audit')">操作审计</button>
+          <span id="logCounts" class="muted" style="margin-left:6px"></span>
+        </div>
+        <div class="row" style="gap:8px">
+          <input id="logQuery" placeholder="搜索关键词" style="max-width:280px" onkeydown="if(event.key==='Enter')loadLogs(0)"/>
+          <select id="logLevel" style="max-width:126px"><option value="">全部级别</option><option value="info">信息</option><option value="warn">警告</option><option value="error">错误</option></select>
+          <select id="logScope" style="max-width:170px"><option value="">全部模块</option></select>
+          <button class="btn-small" onclick="loadLogs(0)">查询</button>
+          <button class="btn-small ghost" onclick="exportLogs()">导出 CSV</button>
+          <button class="btn-small ghost" onclick="clearLogs()">清空当前视图</button>
+        </div>
+        <div id="logBox" class="log-box" style="margin-top:10px;max-height:460px">加载中…</div>
+        <div class="row" style="justify-content:space-between;margin-top:8px">
+          <span id="logPage" class="muted">共 0 条</span>
+          <div class="row" style="gap:6px">
+            <button class="btn-small ghost" id="logPrev" onclick="loadLogs(logOffset-logLimit)">上一页</button>
+            <button class="btn-small ghost" id="logNext" onclick="loadLogs(logOffset+logLimit)">下一页</button>
+          </div>
+        </div>
+        <div id="logHint" class="muted" style="margin-top:6px"></div>
       </div>
 
     </div>
@@ -1087,7 +1114,7 @@ async function loadAdminUser(){
   if(q('#autoConnectivityMin')) q('#autoConnectivityMin').value=Math.max(1,Math.round(Number(j.auto_connectivity_ms||600000)/60000));
   if(q('#autoConnectivityLimit')) q('#autoConnectivityLimit').value=Number(j.auto_connectivity_limit||50);
   renderConnectivityStatus(j.connectivity_status||{});
-  await loadSubLogs();
+  await loadLogCenter();
 }
 
 async function saveAdminUser(){
@@ -1108,16 +1135,126 @@ async function runConnectivityNow(){
   toast('已完成一次连通性扫描','ok');
 }
 
-async function loadSubLogs(){
-  const box=q('#subLogs');
-  if(!box) return;
+let logsKind='subscription',logOffset=0,logLimit=50,logsTotal=0;
+const LOG_KIND_META={
+  system:{tab:'#logKindSystem',search:'搜索日志内容（例如 template / sync / 失败）',hint:'运行日志：服务自身输出，与 systemd 日志同源。模板刷新失败、上游同步异常、登录失败都会记录在这里，也支持导出 CSV。'},
+  subscription:{tab:'#logKindSubscription',search:'搜索订阅名 / IP / 设备 / User-Agent',hint:'访问日志：每次 /sub/<token> 或 /sub/<token>/clash 拉取记录，含设备识别。分页与自动刷新只在第一页生效。'},
+  audit:{tab:'#logKindAudit',search:'搜索操作 / 对象 / 详情',hint:'操作审计：登录成功，以及页面上的新增、修改、删除操作（不含请求体，避免记录密码）。'}
+};
+function renderLogKind(){
+  Object.values(LOG_KIND_META).forEach(m=>{const el=q(m.tab);if(el)el.classList.remove('tab-on')});
+  const active=q(LOG_KIND_META[logsKind]?.tab);
+  if(active) active.classList.add('tab-on');
+  const sys=logsKind==='system';
+  [q('#logLevel'),q('#logScope')].forEach(el=>{if(!el)return;el.disabled=!sys;el.style.opacity=sys?'1':'.45'});
+  const kw=q('#logQuery');
+  if(kw) kw.placeholder=LOG_KIND_META[logsKind]?.search||'搜索关键词';
+  const hint=q('#logHint');
+  if(hint) hint.textContent=LOG_KIND_META[logsKind]?.hint||'';
+}
+async function setLogKind(kind){
+  if(kind===logsKind) return;
+  logsKind=kind; logOffset=0; renderLogKind(); await loadLogs(0);
+}
+function logQueryParams(extra={}){
+  const p=new URLSearchParams(extra);
+  const kw=(q('#logQuery')?.value||'').trim(); if(kw) p.set('q',kw);
+  if(logsKind==='system'){
+    const lv=(q('#logLevel')?.value||'').trim(); if(lv) p.set('level',lv);
+    const sc=(q('#logScope')?.value||'').trim(); if(sc) p.set('scope',sc);
+  }
+  return p;
+}
+function logLevelCell(level){
+  const l=String(level||'info').toLowerCase();
+  if(l==='error') return '<span class="err">错误</span>';
+  if(l==='warn') return '<span style="color:#c2740b">警告</span>';
+  return '<span class="muted">信息</span>';
+}
+function logTimeCell(v){
+  const d=new Date(v);
+  return isNaN(d.getTime())?esc(String(v||'')):d.toLocaleString();
+}
+function renderLogRows(kind,rows){
+  if(!rows.length) return '<div class="muted" style="padding:8px 2px">暂无记录</div>';
+  if(kind==='system'){
+    return '<div style="overflow-x:auto"><table><thead><tr><th style="width:150px">时间</th><th style="width:64px">级别</th><th style="width:96px">模块</th><th>内容</th></tr></thead><tbody>'+
+      rows.map(x=>`<tr><td>${logTimeCell(x.created_at)}</td><td>${logLevelCell(x.level)}</td><td><span class="pill">${esc(x.scope||'app')}</span></td><td style="word-break:break-word">${esc(x.message||'')}${x.detail?`<div class="muted">${esc(x.detail)}</div>`:''}</td></tr>`).join('')+
+      '</tbody></table></div>';
+  }
+  if(kind==='audit'){
+    return '<div style="overflow-x:auto"><table><thead><tr><th style="width:150px">时间</th><th style="width:170px">操作</th><th style="width:170px">对象</th><th>详情</th></tr></thead><tbody>'+
+      rows.map(x=>`<tr><td>${logTimeCell(x.created_at)}</td><td>${esc(x.action||'')}</td><td><span class="pill">${esc(x.target_type||'')}${x.target_id?` #${esc(x.target_id)}`:''}</span></td><td style="word-break:break-word">${esc(x.detail||'')}</td></tr>`).join('')+
+      '</tbody></table></div>';
+  }
+  return '<div style="overflow-x:auto"><table><thead><tr><th style="width:150px">时间</th><th>订阅</th><th style="width:76px">类型</th><th style="width:160px">设备</th><th style="width:132px">IP</th><th style="width:220px">User-Agent</th></tr></thead><tbody>'+
+    rows.map(x=>`<tr><td>${logTimeCell(x.created_at)}</td><td>${esc(x.subscription_name||x.token||'')}</td><td>${esc(x.route_type||'')}</td><td title="${esc(x.device||'')}">${esc(x.icon||'')} ${esc(x.device||'未知')}</td><td>${esc(x.client_ip||'')}</td><td title="${esc(x.user_agent||'')}">${esc((x.user_agent||'').slice(0,58))}${(x.user_agent||'').length>58?'…':''}</td></tr>`).join('')+
+    '</tbody></table></div>';
+}
+async function loadLogs(offset=0){
+  const box=q('#logBox'); if(!box) return;
+  const kind=logsKind;
+  offset=Number(offset);
+  if(!Number.isFinite(offset)||offset<0) offset=0;
+  const samePage=offset===logOffset;
+  const keepTop=box.scrollTop;
+  const params=logQueryParams({kind,limit:String(logLimit),offset:String(offset)});
   try{
-    const j=await api('/api/admin/subscription-logs?limit=10');
-    const arr=j.logs||[];
-    if(!arr.length){box.innerHTML='<div class="muted">暂无日志</div>';return;}
-    box.innerHTML=`<div style="overflow-x:auto"><table><thead><tr><th>时间</th><th>订阅</th><th>类型</th><th>设备</th><th>IP</th><th>User-Agent</th></tr></thead><tbody>${arr.map(x=>`<tr><td>${new Date(x.created_at).toLocaleString()}</td><td>${esc(x.subscription_name||x.token||'')}</td><td>${esc(x.route_type||'')}</td><td>${esc(x.device_hint||'unknown')}</td><td>${esc(x.client_ip||'')}</td><td title="${esc(x.user_agent||'')}">${esc((x.user_agent||'').slice(0,80))}${(x.user_agent||'').length>80?'...':''}</td></tr>`).join('')}</tbody></table></div>`;
+    const j=await api('/api/admin/logs?'+params.toString());
+    if(kind!==logsKind) return;
+    logOffset=offset; logsTotal=Number(j.total||0);
+    box.innerHTML=renderLogRows(kind,j.rows||[]);
+    if(samePage) box.scrollTop=keepTop;
+    const page=q('#logPage');
+    if(page) page.textContent=logsTotal?`共 ${logsTotal} 条 · 第 ${offset+1}-${Math.min(offset+logLimit,logsTotal)} 条`:'共 0 条';
+    const prev=q('#logPrev'), next=q('#logNext');
+    if(prev) prev.disabled=offset<=0;
+    if(next) next.disabled=offset+logLimit>=logsTotal;
   }catch(e){
-    box.innerHTML=`<div class="err">日志加载失败：${esc(e.message)}</div>`;
+    box.innerHTML=`<div class="err">日志加载失败：${esc(e&&e.message||e)}</div>`;
+  }
+}
+async function loadLogStats(){
+  try{
+    const j=await api('/api/admin/logs/stats');
+    const st=j.stats||{};
+    const counts=q('#logCounts');
+    if(counts) counts.textContent=`运行 ${Number(st.system||0)} · 访问 ${Number(st.subscription||0)} · 审计 ${Number(st.audit||0)}`;
+    const sel=q('#logRetention'); if(sel) sel.value=String(Number(j.retention_days||0));
+    const scope=q('#logScope');
+    if(scope){
+      const prev=scope.value;
+      scope.innerHTML='<option value="">全部模块</option>'+(j.scopes||[]).map(sp=>`<option value="${esc(sp.scope)}">${esc(sp.scope)} · ${Number(sp.count||0)}</option>`).join('');
+      if(prev&&[...scope.options].some(o=>o.value===prev)) scope.value=prev;
+    }
+  }catch(_e){}
+}
+async function loadLogCenter(){
+  renderLogKind();
+  await loadLogStats();
+  await loadLogs(0);
+}
+async function saveLogRetention(){
+  const days=Number(q('#logRetention')?.value||0);
+  try{
+    await api('/api/admin/user',{method:'POST',body:JSON.stringify({log_retention_days:days})});
+    toast(days?`日志保留 ${days} 天，超期自动清理`:'日志改为永久保留','ok');
+  }catch(e){
+    toast('保存失败：'+(e&&e.message||e),'err');
+  }
+}
+function exportLogs(){
+  window.location.href='/api/admin/logs/export?'+logQueryParams({kind:logsKind}).toString();
+}
+async function clearLogs(){
+  const label={system:'运行日志',subscription:'访问日志',audit:'操作审计'}[logsKind]||'日志';
+  if(!confirm(`确认清空${label}？此操作不可撤销。`)) return;
+  try{
+    const j=await api('/api/admin/logs/clear',{method:'POST',body:JSON.stringify({kind:logsKind})});
+    toast(`已清空 ${Number(j.removed||0)} 条${label}`,'ok');
+    await loadLogCenter();
+  }catch(e){
+    toast('清空失败：'+(e&&e.message||e),'err');
   }
 }
 
@@ -1146,7 +1283,6 @@ async function refreshAll(){
   }
 }
 
-async function loadAuditLogs(){const box=q('#auditLogs'); if(!box)return; try{const j=await api('/api/admin/audit-logs?limit=80'); const logs=j.logs||[]; box.innerHTML=logs.length?logs.map(x=>`<div class="item"><b>${esc(x.action)}</b> <span class="pill">${esc(x.target_type)} #${esc(x.target_id)}</span><br><span class="muted">${esc(x.detail||'')} · ${esc(x.created_at||'')}</span></div>`).join(''):'暂无审计';}catch(e){box.innerHTML=`<span class="err">${esc(e.message)}</span>`;}}
 
 async function init(){
   let initialTab='home';
@@ -1157,7 +1293,11 @@ async function init(){
   switchTab(initialTab);
   await refreshAll();
   setInterval(async()=>{
-    if(!q('#tab-user')?.classList.contains('hide')) await loadSubLogs();
+    if(q('#tab-user')?.classList.contains('hide')) return;
+    if(logOffset>0||logsKind==='audit') return;
+    if((q('#logQuery')?.value||'').trim()) return;
+    if(logsKind==='system'&&((q('#logLevel')?.value||'')||(q('#logScope')?.value||''))) return;
+    await loadLogs(0);
   },5000)
 }
 q('#lp')?.addEventListener('keydown',e=>{if(e.key==='Enter')login()});
