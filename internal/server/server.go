@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -771,25 +770,40 @@ func (s *Server) refreshClashTemplate() {
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err != nil {
+				log.Printf("[clash-template] build request failed: %v", err)
 				return
 			}
 			req.Header.Set("User-Agent", "subgo")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
+				log.Printf("[clash-template] fetch failed: %v", err)
 				return
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != 200 {
+				log.Printf("[clash-template] fetch failed: http %d", resp.StatusCode)
 				return
 			}
 			body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 			if err != nil || len(body) == 0 {
+				log.Printf("[clash-template] empty response (err=%v)", err)
 				return
+			}
+			// Never cache a template we cannot parse. A broken upstream edit has to
+			// leave the last good template in service: serving the built-in fallback
+			// instead silently drops every policy group and every routing rule.
+			info, err := subconv.ValidateTemplate(body)
+			if err != nil {
+				log.Printf("[clash-template] rejected invalid template, keeping previous version: %v", err)
+				return
+			}
+			if info.ProxyGroups == 0 {
+				log.Printf("[clash-template] warning: template defines no proxy-groups, clients will lose every group")
 			}
 			s.templateMu.Lock()
 			s.templateData = body
 			s.templateMu.Unlock()
-			fmt.Println("[clash-template] refreshed")
+			log.Printf("[clash-template] refreshed (%d bytes, proxy-groups=%d rules=%d)", len(body), info.ProxyGroups, info.Rules)
 		}()
 		time.Sleep(5 * time.Minute)
 	}

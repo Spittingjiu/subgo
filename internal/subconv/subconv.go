@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"strconv"
@@ -128,6 +130,35 @@ func ClashYAML(links []string) (string, error) {
 	return ClashYAMLFromTemplate(links, nil)
 }
 
+// TemplateInfo summarises a Clash template that passed validation.
+type TemplateInfo struct {
+	ProxyGroups int
+	Rules       int
+}
+
+// ValidateTemplate checks that body is a usable Clash template before it is
+// cached and served. Upstream templates are hand-edited and the overlay step can
+// only substitute proxies, so an unparseable template used to fall through to
+// the built-in minimal config without a word - dropping every policy group and
+// every routing rule from all subscriptions at once.
+func ValidateTemplate(body []byte) (TemplateInfo, error) {
+	var info TemplateInfo
+	var tmpl map[string]any
+	if err := yaml.Unmarshal(body, &tmpl); err != nil {
+		return info, fmt.Errorf("invalid yaml: %w", err)
+	}
+	if len(tmpl) == 0 {
+		return info, errors.New("template parsed to an empty document")
+	}
+	if groups, ok := tmpl["proxy-groups"].([]any); ok {
+		info.ProxyGroups = len(groups)
+	}
+	if rules, ok := tmpl["rules"].([]any); ok {
+		info.Rules = len(rules)
+	}
+	return info, nil
+}
+
 // ClashYAMLFromTemplate generates clash config. If templateYAML is non-empty,
 // it's used as the base (DNS, rules, rule-providers, etc.) and only proxies are overlaid.
 func ClashYAMLFromTemplate(links []string, templateYAML []byte) (string, error) {
@@ -143,29 +174,62 @@ func ClashYAMLFromTemplate(links []string, templateYAML []byte) (string, error) 
 	// If template provided, use it as base and overlay proxies
 	if len(templateYAML) > 0 {
 		var tmpl map[string]any
-		if err := yaml.Unmarshal(templateYAML, &tmpl); err == nil {
+		err := yaml.Unmarshal(templateYAML, &tmpl)
+		if err == nil {
 			tmpl["proxies"] = proxies
 			// Rebuild proxy-server-nameserver-policy with real node domains
 			rebuildDNSProxyPolicy(tmpl, proxies)
 			b, err := yaml.Marshal(tmpl)
 			return string(b), err
 		}
+		// Templates are validated before they are cached, so this should not be
+		// reachable; log it anyway, because falling through here swaps the whole
+		// config for the built-in fallback.
+		log.Printf("[clash-template] template is not valid yaml, serving built-in fallback: %v", err)
 	}
 
-	// Fallback: built-in template
+	return builtInTemplate(proxies, names)
+}
+
+// builtInTemplate is the last-resort config used when no valid upstream template
+// is available. It deliberately keeps mainland traffic - WeChat included - on
+// DIRECT: the previous fallback sent everything through the proxy, which is what
+// broke WeChat image uploads the moment the upstream template failed to parse.
+func builtInTemplate(proxies []map[string]any, names []string) (string, error) {
 	if len(names) == 0 {
 		names = []string{"DIRECT"}
 	}
 	root := map[string]any{
-		"mixed-port": 7890, "allow-lan": true, "mode": "rule", "log-level": "info",
+		"mixed-port": 7890, "allow-lan": false, "mode": "rule", "log-level": "info",
 		"unified-delay": true, "tcp-concurrent": true, "ipv6": false,
+		"dns": map[string]any{
+			"enable":             true,
+			"ipv6":               false,
+			"enhanced-mode":      "fake-ip",
+			"fake-ip-range":      "198.18.0.1/16",
+			"default-nameserver": []string{"223.5.5.5", "119.29.29.29"},
+			"nameserver":         []string{"https://doh.pub/dns-query", "https://dns.alidns.com/dns-query"},
+			"fake-ip-filter": []string{
+				"*.lan",
+				"*.local",
+				"localhost.ptlogin2.qq.com",
+				"+.qq.com",
+				"+.tencent.com",
+				"+.wechat.com",
+				"+.weixin.qq.com",
+				"+.qpic.cn",
+				"+.qlogo.cn",
+				"+.myqcloud.com",
+				"geosite:cn",
+			},
+		},
 		"sniffer": map[string]any{
 			"enable": true,
 			"sniff": map[string]any{
 				"TLS":  map[string]any{"ports": []int{443, 8443}},
 				"HTTP": map[string]any{"ports": []string{"80", "8080-8880"}},
 			},
-			"skip-domain": []string{"Mijia Cloud", "+.push.apple.com", "geosite:cn"},
+			"skip-domain": []string{"Mijia Cloud", "+.push.apple.com", "+.qq.com", "+.weixin.qq.com", "+.qpic.cn", "geosite:cn"},
 		},
 		"proxies": proxies,
 		"proxy-groups": []map[string]any{
@@ -174,6 +238,14 @@ func ClashYAMLFromTemplate(links []string, templateYAML []byte) (string, error) 
 			{"name": "自动选择", "type": "url-test", "include-all": true, "proxies": []string{}, "url": "https://cp.cloudflare.com/generate_204", "interval": 600, "tolerance": 100, "exclude-filter": "^(?i:(DIRECT|REJECT|PASS))$"},
 		},
 		"rules": []string{
+			"DOMAIN-SUFFIX,qpic.cn,DIRECT",
+			"DOMAIN-SUFFIX,qlogo.cn,DIRECT",
+			"DOMAIN-SUFFIX,weixin.qq.com,DIRECT",
+			"DOMAIN-SUFFIX,wechat.com,DIRECT",
+			"DOMAIN-SUFFIX,qq.com,DIRECT",
+			"DOMAIN-SUFFIX,tencent.com,DIRECT",
+			"DOMAIN-SUFFIX,myqcloud.com,DIRECT",
+			"GEOSITE,cn,DIRECT",
 			"MATCH,🚀 节点选择",
 		},
 	}
