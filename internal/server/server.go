@@ -709,6 +709,7 @@ func (s *Server) bridgePushSource(c *gin.Context) {
 		Name       string `json:"name"`
 		PanelURL   string `json:"panel_url"`
 		PanelToken string `json:"panel_token"`
+		SourceType string `json:"source_type"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "bad json"})
@@ -728,15 +729,35 @@ func (s *Server) bridgePushSource(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "panel_url / panel_token required"})
 		return
 	}
+	// source_type lets panels declare what they are: sui-api panels (sui-go /
+	// sui node) default to sui_api, sing-box panels (S-Matrix / SBUI) push
+	// "sbui". Unknown values are rejected instead of silently mis-typed.
+	sourceType := strings.TrimSpace(req.SourceType)
+	if sourceType == "" {
+		sourceType = "sui_api"
+	}
+	switch sourceType {
+	case "sui_api", "sbui", "xui", "3x_ui":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "unsupported source_type: " + sourceType})
+		return
+	}
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM sources WHERE source_type!='local' AND panel_url=? LIMIT 1`, panelURL).Scan(&id)
+	var existingType string
+	err := s.db.QueryRow(`SELECT id, source_type FROM sources WHERE source_type!='local' AND panel_url=? LIMIT 1`, panelURL).Scan(&id, &existingType)
 	if err == nil && id > 0 {
 		if err := s.sourceSvc.Update(id, name, panelURL, token, true); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 			return
 		}
+		if existingType != sourceType {
+			if _, err := s.db.Exec(`UPDATE sources SET source_type=?, sui_flavor='', updated_at=? WHERE id=?`, sourceType, time.Now().UTC().Format(time.RFC3339), id); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
+				return
+			}
+		}
 	} else {
-		src, err := s.sourceSvc.Create(name, "sui_api", panelURL, token)
+		src, err := s.sourceSvc.Create(name, sourceType, panelURL, token)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 			return
