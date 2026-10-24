@@ -609,9 +609,7 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 				continue
 			}
 		}
-		var next int64
-		_ = tx.QueryRow(`SELECT COUNT(*)+1 FROM nodes WHERE source_id=?`, sourceID).Scan(&next)
-		disp := fmt.Sprintf("S%d-%03d", sourceID, next)
+		disp := nextDisplayNo(tx, sourceID)
 		if _, err := tx.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,identity,missing_since,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,'',?,?)`, sourceID, disp, in.hash, in.raw, in.name, in.protocol, in.identity, now, now); err != nil {
 			return err
 		}
@@ -659,6 +657,29 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 		log.Printf("[source-sync] source %d node %s missing for %s, removed", sourceID, shortHash(e.hash), nodeMissingGrace)
 	}
 	return tx.Commit()
+}
+
+// nextDisplayNo derives the next short label from existing labels instead of a
+// row count: counting collides as soon as any node was deleted, which used to
+// hand two nodes the same display number.
+func nextDisplayNo(tx *sql.Tx, sourceID int64) string {
+	rows, err := tx.Query(`SELECT COALESCE(display_no,'') FROM nodes WHERE source_id=?`, sourceID)
+	max := 0
+	if err == nil {
+		for rows.Next() {
+			var label string
+			if err := rows.Scan(&label); err != nil {
+				continue
+			}
+			if i := strings.LastIndex(label, "-"); i >= 0 {
+				if n, err := strconv.Atoi(label[i+1:]); err == nil && n > max {
+					max = n
+				}
+			}
+		}
+		rows.Close()
+	}
+	return fmt.Sprintf("S%d-%03d", sourceID, max+1)
 }
 
 // nodeMissingGrace is how long a node may be absent from the upstream answer
