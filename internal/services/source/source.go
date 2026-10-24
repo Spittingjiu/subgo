@@ -566,6 +566,16 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 		return err
 	}
 
+	// Freshly inserted rows in this sync, used to recognise the successor of a
+	// node whose share host/domain changed (e.g. a panel moving to a new domain).
+	type syncInserted struct {
+		hash     string
+		protocol string
+		port     int
+		name     string
+	}
+	inserted := []syncInserted{}
+
 	matched := make(map[int64]struct{}, len(list))
 	for _, in := range list {
 		if e, ok := byHash[in.hash]; ok {
@@ -605,6 +615,8 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 		if _, err := tx.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,identity,missing_since,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,'',?,?)`, sourceID, disp, in.hash, in.raw, in.name, in.protocol, in.identity, now, now); err != nil {
 			return err
 		}
+		parsed := subconv.ParseRawLink(in.raw)
+		inserted = append(inserted, syncInserted{hash: in.hash, protocol: parsed.Protocol, port: parsed.Port, name: parsed.Name})
 	}
 
 	// Nodes that vanished from the upstream answer start a grace period instead of
@@ -615,6 +627,22 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 			continue
 		}
 		if e.missingSince == "" {
+			// The same logical node may have come back under a new host (panel moved
+			// to another domain, so protocol|host|port identity changed). Hand the
+			// subscription selections over to the new hash before going stale,
+			// otherwise the node silently disappears from every subscription.
+			old := subconv.ParseRawLink(e.raw)
+			for _, ins := range inserted {
+				if ins.protocol != old.Protocol || ins.port != old.Port || ins.name != old.Name {
+					continue
+				}
+				if err := rewriteSubHashes(tx, e.hash, ins.hash); err != nil {
+					return err
+				}
+				log.Printf("[source-sync] source %d node %s moved to %s, subscriptions re-linked to %s",
+					sourceID, shortHash(e.hash), ins.name, shortHash(ins.hash))
+				break
+			}
 			if _, err := tx.Exec(`UPDATE nodes SET missing_since=?,updated_at=? WHERE id=?`, now, now, e.id); err != nil {
 				return err
 			}

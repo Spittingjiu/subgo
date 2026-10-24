@@ -72,3 +72,45 @@ func TestBuiltInTemplateKeepsCNTrafficDirect(t *testing.T) {
 		}
 	}
 }
+
+func TestClashProxyAnyTLS(t *testing.T) {
+	raw := "anytls://secretpass@hk.example.com:12612?insecure=1&sni=www.bing.com#HK-AnyTLS"
+	px := ClashProxy(raw)
+	if px == nil {
+		t.Fatalf("anytls must not be dropped")
+	}
+	if px["type"] != "anytls" {
+		t.Fatalf("wrong type: %v", px["type"])
+	}
+	if px["password"] != "secretpass" {
+		t.Fatalf("wrong password: %v", px["password"])
+	}
+	if px["server"] != "hk.example.com" || px["port"] != 12612 {
+		t.Fatalf("wrong endpoint: %v:%v", px["server"], px["port"])
+	}
+	if px["sni"] != "www.bing.com" {
+		t.Fatalf("wrong sni: %v", px["sni"])
+	}
+	if px["skip-cert-verify"] != true {
+		t.Fatalf("insecure=1 must map to skip-cert-verify")
+	}
+	if px["name"] != "HK-AnyTLS" {
+		t.Fatalf("wrong name: %v", px["name"])
+	}
+}
+
+func TestClashYAMLIncludesAnyTLS(t *testing.T) {
+	links := []string{
+		"anytls://secretpass@hk.example.com:12612?insecure=1&sni=www.bing.com#HK-AnyTLS",
+	}
+	out, err := ClashYAML(links)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(out, "type: anytls") {
+		t.Fatalf("clash config missing anytls proxy:\n%s", out)
+	}
+	if !strings.Contains(out, "HK-AnyTLS") {
+		t.Fatalf("clash config missing node name:\n%s", out)
+	}
+}

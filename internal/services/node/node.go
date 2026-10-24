@@ -22,7 +22,7 @@ func (s *Service) LocalSourceID() (int64, error) {
 }
 
 func (s *Service) List(sourceID int64) ([]models.Node, error) {
-	q := `SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.enabled IN (0,1) AND s.enabled=1`
+	q := `SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.enabled IN (0,1) AND s.enabled=1 AND COALESCE(n.missing_since,'')=''`
 	args := []any{}
 	if sourceID > 0 {
 		q += ` AND n.source_id=?`

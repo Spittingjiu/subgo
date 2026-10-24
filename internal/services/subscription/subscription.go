@@ -98,7 +98,7 @@ func (s *Service) links(token, clientIP, ua, routeType string) (string, error) {
 	if !sub.Enabled {
 		return "", errors.New("subscription disabled")
 	}
-	q := `SELECT n.raw_link FROM nodes n JOIN sources s ON s.id=n.source_id WHERE n.enabled=1 AND s.enabled=1`
+	q := `SELECT n.raw_link FROM nodes n JOIN sources s ON s.id=n.source_id WHERE n.enabled=1 AND s.enabled=1 AND COALESCE(n.missing_since,'')=''`
 	args := []any{}
 	if sub.AutoPruneUnreachable {
 		q += ` AND NOT EXISTS (SELECT 1 FROM node_connectivity nc WHERE nc.node_id=n.id AND nc.status='fail')`

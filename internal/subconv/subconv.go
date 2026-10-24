@@ -164,11 +164,24 @@ func ValidateTemplate(body []byte) (TemplateInfo, error) {
 func ClashYAMLFromTemplate(links []string, templateYAML []byte) (string, error) {
 	proxies := []map[string]any{}
 	names := []string{}
+	// Mihomo rejects duplicates by proxy name, and a source that re-announces a
+	// node under a new host can briefly produce two rows with the same remark.
+	seen := map[string]int{}
 	for i, raw := range links {
-		if px := clashProxy(raw, i+1); px != nil {
-			proxies = append(proxies, px)
-			names = append(names, fmt.Sprint(px["name"]))
+		px := clashProxy(raw, i+1)
+		if px == nil {
+			continue
 		}
+		name := fmt.Sprint(px["name"])
+		if n := seen[name]; n > 0 {
+			seen[name] = n + 1
+			name = fmt.Sprintf("%s-%d", name, n+1)
+			px["name"] = name
+		} else {
+			seen[name] = 1
+		}
+		proxies = append(proxies, px)
+		names = append(names, name)
 	}
 
 	// If template provided, use it as base and overlay proxies
@@ -409,6 +422,24 @@ func clashProxy(raw string, idx int) map[string]any {
 		}
 		if sni != "" {
 			m["sni"] = sni
+		}
+		return m
+	case "anytls":
+		// AnyTLS carries the secret in userinfo and always runs over TLS. Mihomo
+		// expects type "anytls"; without this case the node was silently dropped
+		// from every Clash config while still showing up in the panel.
+		m := map[string]any{
+			"name": name, "type": "anytls", "server": host, "port": port,
+			"password": u.User.Username(), "udp": true,
+		}
+		if sni != "" {
+			m["sni"] = sni
+		}
+		if q.Get("insecure") == "1" || strings.EqualFold(q.Get("allowinsecure"), "1") {
+			m["skip-cert-verify"] = true
+		}
+		if alpn := splitNonEmpty(q.Get("alpn"), ","); len(alpn) > 0 {
+			m["alpn"] = alpn
 		}
 		return m
 	case "ss":

@@ -177,3 +177,33 @@ func TestMissingNodeRemovedAfterGrace(t *testing.T) {
 		t.Fatalf("stale node not removed after grace, count=%d", count)
 	}
 }
+
+// A panel that moves to another domain changes protocol|host|port identity, so
+// the node looks brand new. Subscriptions must follow it instead of dropping it.
+func TestHostRenameReLinksSubscriptions(t *testing.T) {
+	svc, d, sid := newTestSvc(t)
+	if err := svc.upsertNodes(sid, []string{linkA}); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	_, hash0, _, _, _ := nodeRow(t, d, sid)
+	sub := addSub(t, d, hash0)
+
+	// Same node, new host.
+	moved := "vless://11111111-1111-1111-1111-111111111111@9.9.9.9:443?flow=xtls-rprx-vision&fp=chrome&security=reality&pbk=AAA&sid=bb&type=tcp#test-node"
+	if err := svc.upsertNodes(sid, []string{moved}); err != nil {
+		t.Fatalf("moved upsert: %v", err)
+	}
+	newHash := subconv.StableHash(moved)
+	got := subHashes(t, d, sub)
+	if len(got) != 1 || got[0] != newHash {
+		t.Fatalf("subscription did not follow the node to its new host: %v (want %s)", got, newHash)
+	}
+	// The old row stays for the grace window but must be hidden from output.
+	var missing string
+	if err := d.QueryRow(`SELECT COALESCE(missing_since,'') FROM nodes WHERE node_hash=?`, hash0).Scan(&missing); err != nil {
+		t.Fatalf("old row gone: %v", err)
+	}
+	if missing == "" {
+		t.Fatalf("old row should be in grace, not active")
+	}
+}
