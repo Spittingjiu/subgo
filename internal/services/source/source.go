@@ -1625,7 +1625,11 @@ func AssertURLSafe(raw string) error {
 		return err
 	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		// Allow loopback (127.0.0.1, ::1) so subgo can connect to local panel services on the same host
+		if ip.IsLoopback() {
+			continue
+		}
+		if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 			return fmt.Errorf("blocked private ip %s", ip.String())
 		}
 		if ip.String() == "169.254.169.254" {

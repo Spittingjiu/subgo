@@ -379,6 +379,7 @@ func clashProxy(raw string, idx int) map[string]any {
 			// Mihomo rejects reality proxies without public-key. Drop malformed links
 			// instead of letting one bad upstream node break the whole Clash config.
 			if pbk == "" {
+				log.Printf("[subconv] dropped reality proxy %q: missing public-key (pbk)", name)
 				return nil
 			}
 			ro := map[string]any{"public-key": pbk}
