@@ -242,6 +242,7 @@ func clashProxy(raw string, idx int) map[string]any {
 		// Deliberately log only a fixed diagnostic code, never the raw link,
 		// userinfo, endpoint query, display name or parser error text.
 		log.Printf("[subconv] conversion skipped: code=%s", issue.Code)
+		return nil
 	}
 	return px
 }
