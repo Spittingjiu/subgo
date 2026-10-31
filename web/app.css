@@ -1,0 +1,452 @@
+/* ============================================================
+   万象星枢 - 全端自适应与移动端UI重构 (app.css)
+   ============================================================ */
+
+/* 基础无障碍与交互细节 */
+button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid #3b82f6;
+  outline-offset: 3px;
+}
+button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+  transform: none !important;
+}
+button {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  user-select: none;
+  touch-action: manipulation;
+}
+input[type=checkbox] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+input, select, textarea {
+  min-width: 0;
+  max-width: 100%;
+  font-family: inherit;
+}
+body.auth-mode #bottomNav {
+  display: none !important;
+}
+
+/* Toast 提示浮窗 */
+.toast-region {
+  position: fixed;
+  z-index: 120;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, calc(100% - 28px));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 40px rgba(0,0,0,.15);
+  overflow-wrap: anywhere;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  animation: toastSlideDown .2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes toastSlideDown {
+  from { opacity: 0; transform: translate(-50%, -12px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.toast-region.hide { display: none !important; }
+.toast-region.ok { border-color: var(--ok); }
+.toast-region.err { border-color: var(--err); }
+.toast-region #toastText { flex: 1; min-width: 0; font-size: 14px; font-weight: 550; }
+.toast-region button { flex: 0 0 auto; cursor: pointer; padding: 4px 8px !important; }
+
+/* 响应式表格容器 */
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 16px;
+  border: 1px solid var(--line2);
+  margin-top: 8px;
+}
+.table-wrap table {
+  border: none !important;
+  border-radius: 0 !important;
+  margin: 0 !important;
+  min-width: 640px;
+}
+
+/* 模态弹窗系统 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 90;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: modalFadeIn .18s ease-out;
+}
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.modal-box {
+  width: min(720px, 96vw);
+  max-height: calc(100dvh - 36px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--line2);
+  border-radius: 24px;
+  padding: 22px;
+  box-shadow: 0 28px 80px rgba(0,0,0,.22);
+}
+.modal-header h3 { font-size: 20px; margin: 0; }
+.modal-inputs { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* 节点选择网格 (编辑订阅内) */
+.modal-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+.modal-node-item {
+  border: 1px solid var(--line2) !important;
+  background: var(--surface) !important;
+  transition: .15s border-color, .15s background-color;
+}
+.modal-node-item:hover {
+  background: var(--surface2) !important;
+}
+.modal-node-item.is-selected {
+  border-color: #3b82f6 !important;
+  background: rgba(59, 130, 246, 0.08) !important;
+}
+body.theme-light .modal-node-item.is-selected {
+  border-color: #60a5fa !important;
+  background: rgba(59, 130, 246, 0.16) !important;
+}
+
+/* 订阅卡片样式 */
+.src-item {
+  transition: .15s box-shadow;
+}
+.sub-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.sub-link-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+.sub-link-row input[readonly] {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px !important;
+}
+.sub-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* 订阅二维码弹窗 */
+#linkQr {
+  width: min(240px, 100%);
+  height: auto;
+  aspect-ratio: 1;
+  background: white;
+  padding: 10px;
+  margin: 14px auto;
+  border-radius: 16px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.08);
+}
+#linkQr svg { width: 100%; height: 100%; display: block; }
+#linkText {
+  width: 100%;
+  font-size: 13px !important;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+/* 分页器 */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pager select { width: auto; }
+
+/* ============================================================
+   移动端响应式布局重做 (max-width: 860px)
+   ============================================================ */
+@media (max-width: 860px) {
+  html, body {
+    overflow-x: hidden !important;
+    width: 100% !important;
+    -webkit-tap-highlight-color: transparent;
+  }
+  
+  .wrap {
+    padding: 12px 12px calc(92px + env(safe-area-inset-bottom)) !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  
+  /* 顶部栏自适应 */
+  .wrap > .row:first-child {
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    margin-bottom: 12px !important;
+  }
+  .wrap > .row:first-child h1 {
+    font-size: 20px !important;
+    margin: 0 !important;
+  }
+  .wrap > .row:first-child .muted {
+    font-size: 11px !important;
+  }
+  #tabHomeBtn, #tabNodeBtn, #tabSuiBtn, #tabUserBtn {
+    display: none !important;
+  }
+  
+  /* 底部毛玻璃导航栏 */
+  .bottom-nav {
+    display: flex !important;
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 80 !important;
+    background: rgba(255, 255, 255, 0.88) !important;
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    border-top: 1px solid var(--line2) !important;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom)) !important;
+    justify-content: space-around !important;
+    align-items: center !important;
+    box-shadow: 0 -4px 20px rgba(0,0,0,.06) !important;
+  }
+  body.theme-light .bottom-nav {
+    background: rgba(18, 22, 33, 0.88) !important;
+    border-color: var(--line2) !important;
+  }
+  .bottom-nav button {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 3px !important;
+    padding: 6px 10px !important;
+    border-radius: 14px !important;
+    border: none !important;
+    background: transparent !important;
+    color: var(--muted) !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    min-width: 58px !important;
+    min-height: 44px !important;
+    transition: .15s background, .15s color !important;
+  }
+  .bottom-nav button.bnav-on {
+    color: var(--text) !important;
+    background: var(--surface2) !important;
+  }
+  body.theme-light .bottom-nav button.bnav-on {
+    color: #fff !important;
+    background: rgba(255, 255, 255, 0.12) !important;
+  }
+  
+  /* 卡片尺寸与内边距 */
+  .card {
+    border-radius: 20px !important;
+    padding: 16px !important;
+    margin-bottom: 12px !important;
+  }
+  .card h3 {
+    font-size: 17px !important;
+  }
+  
+  /* 表单控件优化 */
+  input, select, textarea, button {
+    min-height: 42px !important;
+    font-size: 15px !important;
+  }
+  .btn-small {
+    min-height: 34px !important;
+    padding: 6px 10px !important;
+    font-size: 12px !important;
+  }
+  
+  /* 订阅卡片移动端适配 */
+  .src-item {
+    padding: 14px !important;
+    border-radius: 18px !important;
+    margin: 10px 0 !important;
+  }
+  .src-item .sub-card-header {
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+  }
+  .src-item .sub-link-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 6px !important;
+  }
+  .src-item .sub-link-row input {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+  }
+  .src-item .sub-actions {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    margin-top: 10px !important;
+    padding-top: 8px !important;
+    border-top: 1px dashed var(--line2) !important;
+  }
+  .src-item .sub-actions button {
+    flex: 1 1 calc(33.3% - 6px) !important;
+  }
+  
+  /* 节点筛选栏在移动端 */
+  .filter-toolbar {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+  .filter-toolbar input, .filter-toolbar select {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+    max-width: 100% !important;
+  }
+  
+  /* 节点添加栏在移动端 */
+  #tab-nodes .card > .row:first-of-type {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+  #tab-nodes .card > .row:first-of-type > * {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  
+  /* 节点表格移动端卡片化 */
+  #nodes {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  #nodes table, #nodes tbody {
+    display: block !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    border: none !important;
+    background: transparent !important;
+  }
+  #nodes thead {
+    display: none !important;
+  }
+  #nodes tbody tr {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    border: 1px solid var(--line2) !important;
+    border-radius: 16px !important;
+    background: var(--surface) !important;
+    margin-bottom: 10px !important;
+    padding: 12px 14px !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,.04) !important;
+  }
+  #nodes td {
+    padding: 0 !important;
+    border: none !important;
+    text-align: left !important;
+    white-space: normal !important;
+  }
+  #nodes td:first-child {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+  }
+  #nodes td:last-child {
+    padding-top: 6px !important;
+    border-top: 1px dashed var(--line2) !important;
+  }
+  #nodes td:last-child .row {
+    justify-content: flex-end !important;
+    gap: 6px !important;
+  }
+  
+  /* 模态弹窗移动端底部抽屉效果 (Bottom Sheet) */
+  .modal-mask {
+    align-items: flex-end !important;
+    padding: 0 !important;
+  }
+  .modal-box {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 88dvh !important;
+    border-radius: 24px 24px 0 0 !important;
+    padding: 18px 16px calc(20px + env(safe-area-inset-bottom)) !important;
+    box-shadow: 0 -8px 30px rgba(0,0,0,.2) !important;
+  }
+  .modal-node-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .sel-list {
+    max-height: 48dvh !important;
+  }
+  .modal-inputs {
+    flex-direction: column !important;
+  }
+  .modal-inputs > * {
+    width: 100% !important;
+  }
+  
+  /* 日志中心移动端 */
+  .log-box {
+    max-height: 50dvh !important;
+  }
+  #logRetention {
+    width: 100% !important;
+  }
+  #tab-user .card .row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+  #tab-user .card .row input, #tab-user .card .row select, #tab-user .card .row button {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  
+  /* 上游 Reality 栏在移动端 */
+  #tab-sui .row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+  #tab-sui .row input, #tab-sui .row select, #tab-sui .row button {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+}

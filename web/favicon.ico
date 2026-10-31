@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="50%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <!-- Star Glow -->
+    <radialGradient id="starGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="45%" stop-color="#a5f3fc"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Orbital Ring Gradient -->
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="50%" stop-color="#e0f2fe" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle Base -->
+  <rect width="128" height="128" rx="30" fill="url(#bg)"/>
+
+  <!-- Orbital Rings: 万象流转轨道 -->
+  <circle cx="64" cy="64" r="44" stroke="url(#ring)" stroke-width="2.5" stroke-dasharray="4 5" opacity="0.7"/>
+  <ellipse cx="64" cy="64" rx="48" ry="18" stroke="url(#ring)" stroke-width="3.5" transform="rotate(-28 64 64)"/>
+  <ellipse cx="64" cy="64" rx="48" ry="18" stroke="url(#ring)" stroke-width="3.5" transform="rotate(38 64 64)"/>
+
+  <!-- Node Satellites: 星节点 -->
+  <circle cx="28" cy="44" r="4.5" fill="#ffffff"/>
+  <circle cx="102" cy="50" r="4" fill="#ffffff"/>
+  <circle cx="78" cy="102" r="4.5" fill="#e0f2fe"/>
+  <circle cx="46" cy="96" r="3.5" fill="#bae6fd"/>
+
+  <!-- Central Nexus Core: 星枢中枢 -->
+  <circle cx="64" cy="64" r="22" fill="url(#starGlow)"/>
+  <!-- Radiant 8-pointed Celestial Star -->
+  <path d="M64 26 L69.5 53.5 L97 59 L74 69 L79 97 L64 77.5 L49 97 L54 69 L31 59 L58.5 53.5 Z" fill="#ffffff"/>
+  <circle cx="64" cy="64" r="6.5" fill="#0284c7"/>
+  <circle cx="64" cy="64" r="3" fill="#ffffff"/>
+</svg>

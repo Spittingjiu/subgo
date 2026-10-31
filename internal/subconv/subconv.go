@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -22,43 +21,18 @@ type ParsedLink struct {
 
 func ParseRawLink(raw string) ParsedLink {
 	raw = strings.TrimSpace(raw)
-	p := ParsedLink{Protocol: "unknown", Name: "未命名节点"}
-	if i := strings.Index(raw, "://"); i > 0 {
-		p.Protocol = strings.ToLower(raw[:i])
-	}
-	// ss:// links: whole content is Base64(method:password@host:port)#name
+	p := ParsedLink{Protocol: protocolOf(raw), Name: fragmentName(raw)}
 	if p.Protocol == "ss" {
-		after := raw[strings.Index(raw, "://")+3:]
-		if idx := strings.Index(after, "#"); idx >= 0 {
-			p.Name, _ = url.QueryUnescape(after[idx+1:])
-			after = after[:idx]
-		}
-		decoded, err := base64.RawStdEncoding.DecodeString(after)
-		if err != nil {
-			decoded, err = base64.StdEncoding.DecodeString(after)
-		}
-		if err == nil {
-			plain := string(decoded)
-			if idx := strings.LastIndex(plain, "@"); idx >= 0 {
-				p.Host = plain[idx+1:]
-				if colon := strings.LastIndex(p.Host, ":"); colon >= 0 {
-					p.Port, _ = strconv.Atoi(p.Host[colon+1:])
-					p.Host = p.Host[:colon]
-				}
-			}
+		link, issue := parseShadowsocksURI(raw)
+		if issue == nil {
+			p.Host, p.Port = link.host, link.port
 		}
 		return p
 	}
+	// Retain the coarse identity model; only the SS URI parsing is repaired.
 	if u, err := url.Parse(raw); err == nil {
-		if u.Fragment != "" {
-			if n, e := url.QueryUnescape(u.Fragment); e == nil && strings.TrimSpace(n) != "" {
-				p.Name = strings.TrimSpace(n)
-			}
-		}
 		p.Host = u.Hostname()
-		if po := u.Port(); po != "" {
-			p.Port, _ = strconv.Atoi(po)
-		}
+		p.Port = numericPort(u.Port())
 	}
 	return p
 }
@@ -143,12 +117,12 @@ type TemplateInfo struct {
 // every routing rule from all subscriptions at once.
 func ValidateTemplate(body []byte) (TemplateInfo, error) {
 	var info TemplateInfo
-	var tmpl map[string]any
-	if err := yaml.Unmarshal(body, &tmpl); err != nil {
-		return info, fmt.Errorf("invalid yaml: %w", err)
+	tmpl, err := parseTemplate(body)
+	if err != nil {
+		return info, err
 	}
-	if len(tmpl) == 0 {
-		return info, errors.New("template parsed to an empty document")
+	if issues := validateConfig(tmpl); len(issues) > 0 {
+		return info, errors.New("template has invalid configuration references or structure")
 	}
 	if groups, ok := tmpl["proxy-groups"].([]any); ok {
 		info.ProxyGroups = len(groups)
@@ -159,49 +133,14 @@ func ValidateTemplate(body []byte) (TemplateInfo, error) {
 	return info, nil
 }
 
-// ClashYAMLFromTemplate generates clash config. If templateYAML is non-empty,
-// it's used as the base (DNS, rules, rule-providers, etc.) and only proxies are overlaid.
+// ClashYAMLFromTemplate preserves the original API. New callers should use
+// ClashYAMLFromTemplateWithReport to see every skipped node and validation issue.
 func ClashYAMLFromTemplate(links []string, templateYAML []byte) (string, error) {
-	proxies := []map[string]any{}
-	names := []string{}
-	// Mihomo rejects duplicates by proxy name, and a source that re-announces a
-	// node under a new host can briefly produce two rows with the same remark.
-	seen := map[string]int{}
-	for i, raw := range links {
-		px := clashProxy(raw, i+1)
-		if px == nil {
-			continue
-		}
-		name := fmt.Sprint(px["name"])
-		if n := seen[name]; n > 0 {
-			seen[name] = n + 1
-			name = fmt.Sprintf("%s-%d", name, n+1)
-			px["name"] = name
-		} else {
-			seen[name] = 1
-		}
-		proxies = append(proxies, px)
-		names = append(names, name)
+	out, report, err := ClashYAMLFromTemplateWithReport(links, templateYAML)
+	if report.SkippedCount > 0 || !report.Valid || len(report.Warnings) > 0 {
+		log.Printf("[subconv] input=%d converted=%d skipped=%d valid=%t errors=%d warnings=%d", report.InputCount, report.ConvertedCount, report.SkippedCount, report.Valid, len(report.Errors), len(report.Warnings))
 	}
-
-	// If template provided, use it as base and overlay proxies
-	if len(templateYAML) > 0 {
-		var tmpl map[string]any
-		err := yaml.Unmarshal(templateYAML, &tmpl)
-		if err == nil {
-			tmpl["proxies"] = proxies
-			// Rebuild proxy-server-nameserver-policy with real node domains
-			rebuildDNSProxyPolicy(tmpl, proxies)
-			b, err := yaml.Marshal(tmpl)
-			return string(b), err
-		}
-		// Templates are validated before they are cached, so this should not be
-		// reachable; log it anyway, because falling through here swaps the whole
-		// config for the built-in fallback.
-		log.Printf("[clash-template] template is not valid yaml, serving built-in fallback: %v", err)
-	}
-
-	return builtInTemplate(proxies, names)
+	return out, err
 }
 
 // builtInTemplate is the last-resort config used when no valid upstream template
@@ -298,178 +237,13 @@ func ClashProxy(raw string) map[string]any {
 }
 
 func clashProxy(raw string, idx int) map[string]any {
-	u, err := url.Parse(raw)
-	p := ParseRawLink(raw)
-	name := p.Name
-	if name == "未命名节点" {
-		name = fmt.Sprintf("node-%d", idx)
+	px, issue, _ := convertProxy(raw, idx)
+	if issue != nil {
+		// Deliberately log only a fixed diagnostic code, never the raw link,
+		// userinfo, endpoint query, display name or parser error text.
+		log.Printf("[subconv] conversion skipped: code=%s", issue.Code)
 	}
-	host := p.Host
-	port := p.Port
-	if host == "" && err == nil {
-		host = u.Hostname()
-	}
-	if port == 0 && err == nil {
-		port, _ = strconv.Atoi(u.Port())
-	}
-	if host == "" || port == 0 {
-		return nil
-	}
-	var q url.Values
-	if err == nil {
-		q = u.Query()
-	}
-	security := strings.ToLower(first(q.Get("security"), "none"))
-	network := strings.ToLower(first(q.Get("type"), "tcp"))
-	fp := first(q.Get("fp"), "chrome")
-	sni := first(q.Get("sni"), q.Get("host"))
-
-	switch strings.ToLower(u.Scheme) {
-	case "vless":
-		m := map[string]any{
-			"name": name, "type": "vless", "server": host, "port": port,
-			"uuid": u.User.Username(), "udp": true, "network": network,
-		}
-		if security != "none" {
-			m["tls"] = true
-		}
-		// Mihomo xhttp connections do not accept flow; keeping it causes
-		// "vision: not a valid supported TLS connection: *xhttp.Conn".
-		// Preserve flow only for non-xhttp transports.
-		if network != "xhttp" {
-			flow := q.Get("flow")
-			if flow != "" {
-				m["flow"] = flow
-			}
-		}
-		if sni != "" {
-			m["servername"] = sni
-		}
-		alpn := splitNonEmpty(q.Get("alpn"), ",")
-		if len(alpn) > 0 {
-			m["alpn"] = alpn
-		}
-		m["client-fingerprint"] = fp
-		if network == "ws" {
-			m["ws-opts"] = map[string]any{
-				"path":    first(q.Get("path"), "/"),
-				"headers": map[string]any{"Host": first(sni, host)},
-			}
-		}
-		if network == "xhttp" {
-			// Prefer explicit transport Host from the share link. For Reality xhttp,
-			// Host and SNI can intentionally differ (for example SJC uses Host=IP
-			// while SNI=www.apple.com). Falling back to SNI is only safe when Host is
-			// absent.
-			xhost := first(q.Get("host"), sni)
-			xopts := map[string]any{"path": first(q.Get("path"), "/")}
-			if xhost != "" {
-				xopts["host"] = xhost
-			}
-			// Mihomo xhttp mode only accepts stream-one, stream-up or packet-up.
-			// Xray share links may contain mode=auto; leaving it out lets Mihomo use
-			// its compatible default instead of emitting an invalid config value.
-			if mode := strings.TrimSpace(q.Get("mode")); mode == "stream-one" || mode == "stream-up" || mode == "packet-up" {
-				xopts["mode"] = mode
-			}
-			m["xhttp-opts"] = xopts
-		}
-		if security == "reality" || q.Get("pbk") != "" {
-			pbk := strings.TrimSpace(q.Get("pbk"))
-			// Mihomo rejects reality proxies without public-key. Drop malformed links
-			// instead of letting one bad upstream node break the whole Clash config.
-			if pbk == "" {
-				return nil
-			}
-			ro := map[string]any{"public-key": pbk}
-			if q.Get("sid") != "" {
-				ro["short-id"] = q.Get("sid")
-			}
-			if network != "xhttp" {
-				spx := first(first(q.Get("spx"), q.Get("spiderx")), "/")
-				ro["spider-x"] = spx
-			}
-			m["reality-opts"] = ro
-		}
-		return m
-	case "hysteria2", "hy2":
-		m := map[string]any{
-			"name": name, "type": "hysteria2", "server": host, "port": port,
-			"password": u.User.Username(), "udp": true,
-		}
-		if sni != "" {
-			m["sni"] = sni
-		}
-		if q.Get("insecure") == "1" {
-			m["skip-cert-verify"] = true
-		}
-		if alpn := splitNonEmpty(q.Get("alpn"), ","); len(alpn) > 0 {
-			m["alpn"] = alpn
-		}
-		if q.Get("mport") != "" {
-			m["ports"] = q.Get("mport")
-		}
-		if q.Get("mportInterval") != "" {
-			if v, err := strconv.Atoi(q.Get("mportInterval")); err == nil && v > 0 {
-				m["hop-interval"] = v
-			}
-		}
-		return m
-	case "trojan":
-		m := map[string]any{
-			"name": name, "type": "trojan", "server": host, "port": port,
-			"password": u.User.Username(), "udp": true,
-		}
-		if sni != "" {
-			m["sni"] = sni
-		}
-		return m
-	case "anytls":
-		// AnyTLS carries the secret in userinfo and always runs over TLS. Mihomo
-		// expects type "anytls"; without this case the node was silently dropped
-		// from every Clash config while still showing up in the panel.
-		m := map[string]any{
-			"name": name, "type": "anytls", "server": host, "port": port,
-			"password": u.User.Username(), "udp": true,
-		}
-		if sni != "" {
-			m["sni"] = sni
-		}
-		if q.Get("insecure") == "1" || strings.EqualFold(q.Get("allowinsecure"), "1") {
-			m["skip-cert-verify"] = true
-		}
-		if alpn := splitNonEmpty(q.Get("alpn"), ","); len(alpn) > 0 {
-			m["alpn"] = alpn
-		}
-		return m
-	case "ss":
-		method, pass := "", ""
-		// ss:// format: ss://base64(method:password@host:port)#name
-		after := raw[strings.Index(raw, "://")+3:]
-		if idx := strings.Index(after, "#"); idx >= 0 {
-			after = after[:idx]
-		}
-		if decoded, err := base64.RawStdEncoding.DecodeString(after); err == nil {
-			plain := string(decoded)
-			if at := strings.LastIndex(plain, "@"); at >= 0 {
-				userInfo := plain[:at]
-				if parts := strings.SplitN(userInfo, ":", 2); len(parts) == 2 {
-					method, pass = parts[0], parts[1]
-				}
-			}
-		} else if decoded, err := base64.StdEncoding.DecodeString(after); err == nil {
-			plain := string(decoded)
-			if at := strings.LastIndex(plain, "@"); at >= 0 {
-				userInfo := plain[:at]
-				if parts := strings.SplitN(userInfo, ":", 2); len(parts) == 2 {
-					method, pass = parts[0], parts[1]
-				}
-			}
-		}
-		return map[string]any{"name": name, "type": "ss", "server": host, "port": port, "cipher": method, "password": pass, "udp": true}
-	default:
-		return nil
-	}
+	return px
 }
 
 func first(v, fb string) string {

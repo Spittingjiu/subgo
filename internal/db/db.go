@@ -41,10 +41,16 @@ func (d *DB) Migrate() error {
 		`PRAGMA foreign_keys=ON`,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS admin_settings (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		// Only hashes of bearer values are persisted. Logout revocations and
+		// source/host/session-bound one-use launch tickets survive restart.
+		`CREATE TABLE IF NOT EXISTS auth_revoked_sessions (token_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, revoked_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_revoked_expiry ON auth_revoked_sessions(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, source_type TEXT NOT NULL, panel_url TEXT NOT NULL DEFAULT '', panel_token TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, last_sync_at TEXT, last_sync_status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS auth_proxy_tickets (ticket_hash TEXT PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE, host TEXT NOT NULL, username TEXT NOT NULL, session_epoch INTEGER NOT NULL, session_hash TEXT NOT NULL, session_expires_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_proxy_ticket_expiry ON auth_proxy_tickets(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE, display_no TEXT NOT NULL, node_hash TEXT NOT NULL UNIQUE, raw_link TEXT NOT NULL, node_name TEXT NOT NULL, protocol TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token TEXT NOT NULL UNIQUE, source_ids_json TEXT NOT NULL DEFAULT '[]', node_ids_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, access_count INTEGER NOT NULL DEFAULT 0, last_accessed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS subscription_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL, subscription_id INTEGER NOT NULL, subscription_name TEXT NOT NULL, route_type TEXT NOT NULL, client_ip TEXT NOT NULL, user_agent TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS subscription_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL, subscription_id INTEGER NOT NULL, subscription_name TEXT NOT NULL, route_type TEXT NOT NULL, client_ip TEXT NOT NULL, user_agent TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'success', error_message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id)`,
 		`CREATE TABLE IF NOT EXISTS node_connectivity (node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, status TEXT NOT NULL, latency_ms INTEGER, last_error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_sub_logs_created ON subscription_logs(created_at DESC)`,
@@ -62,6 +68,12 @@ func (d *DB) Migrate() error {
 	if err := d.addColumnIfMissing("subscriptions", "auto_prune_unreachable", `ALTER TABLE subscriptions ADD COLUMN auto_prune_unreachable INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := d.addColumnIfMissing("subscription_logs", "status", `ALTER TABLE subscription_logs ADD COLUMN status TEXT NOT NULL DEFAULT 'success'`); err != nil {
+		return err
+	}
+	if err := d.addColumnIfMissing("subscription_logs", "error_message", `ALTER TABLE subscription_logs ADD COLUMN error_message TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := d.addColumnIfMissing("sources", "sui_flavor", `ALTER TABLE sources ADD COLUMN sui_flavor TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -73,6 +85,11 @@ func (d *DB) Migrate() error {
 	}
 	// Log retention is a panel setting; 0 means "keep everything".
 	if err := d.addColumnIfMissing("admin_settings", "log_retention_days", `ALTER TABLE admin_settings ADD COLUMN log_retention_days INTEGER NOT NULL DEFAULT 30`); err != nil {
+		return err
+	}
+	// Existing username/password rows are not changed. Legacy tokens lack a
+	// generation/purpose and require a one-time fresh login after upgrade.
+	if err := d.addColumnIfMissing("admin_settings", "session_epoch", `ALTER TABLE admin_settings ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 1`); err != nil {
 		return err
 	}
 	if _, err := d.Exec(`CREATE INDEX IF NOT EXISTS idx_sub_logs_sub ON subscription_logs(subscription_id, id DESC)`); err != nil {

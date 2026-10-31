@@ -1,19 +1,25 @@
 package node
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/models"
+	"github.com/Spittingjiu/subgo/internal/services/connectivity"
 	"github.com/Spittingjiu/subgo/internal/subconv"
 )
 
-type Service struct{ db *sql.DB }
+type Service struct {
+	db           *sql.DB
+	connectivity *connectivity.Service
+}
 
-func New(db *sql.DB) *Service { return &Service{db: db} }
+func New(db *sql.DB) *Service { return &Service{db: db, connectivity: connectivity.New(db)} }
 
 func (s *Service) LocalSourceID() (int64, error) {
 	var id int64
@@ -22,6 +28,13 @@ func (s *Service) LocalSourceID() (int64, error) {
 }
 
 func (s *Service) List(sourceID int64) ([]models.Node, error) {
+	return s.ListContext(context.Background(), sourceID)
+}
+
+func (s *Service) ListContext(ctx context.Context, sourceID int64) ([]models.Node, error) {
+	if err := s.connectivity.ExpireContext(ctx); err != nil {
+		return nil, err
+	}
 	q := `SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.enabled IN (0,1) AND s.enabled=1 AND COALESCE(n.missing_since,'')=''`
 	args := []any{}
 	if sourceID > 0 {
@@ -29,7 +42,7 @@ func (s *Service) List(sourceID int64) ([]models.Node, error) {
 		args = append(args, sourceID)
 	}
 	q += ` ORDER BY n.id DESC`
-	rows, err := s.db.Query(q, args...)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +76,13 @@ func (s *Service) CreateLocal(raw, name string) (models.Node, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var next int64
 	_ = s.db.QueryRow(`SELECT COUNT(*)+1 FROM nodes WHERE source_id=?`, sid).Scan(&next)
-	display := fmt.Sprintf("L-%03d", next)
+	base := strings.TrimSpace(p.Name)
+	if base == "" {
+		base = "本地节点"
+	}
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE display_no LIKE ?`, base+"-%").Scan(&count)
+	display := fmt.Sprintf("%s-%02d", base, count+1)
 	res, err := s.db.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)`, sid, display, h, raw, p.Name, p.Protocol, now, now)
 	if err != nil {
 		return models.Node{}, err
@@ -73,12 +92,18 @@ func (s *Service) CreateLocal(raw, name string) (models.Node, error) {
 }
 
 func (s *Service) Get(id int64) (models.Node, error) {
-	row := s.db.QueryRow(`SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.id=?`, id)
+	return s.GetContext(context.Background(), id)
+}
+
+func (s *Service) GetContext(ctx context.Context, id int64) (models.Node, error) {
+	if err := s.connectivity.ExpireContext(ctx); err != nil {
+		return models.Node{}, err
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT n.id,n.source_id,s.name,s.source_type,n.display_no,n.node_hash,n.raw_link,n.node_name,n.protocol,n.enabled,n.created_at,n.updated_at,c.status,c.latency_ms,c.last_error FROM nodes n JOIN sources s ON s.id=n.source_id LEFT JOIN node_connectivity c ON c.node_id=n.id WHERE n.id=?`, id)
 	return scanNode(row)
 }
 func (s *Service) Toggle(id int64, enabled bool) error {
-	_, err := s.db.Exec(`UPDATE nodes SET enabled=?,updated_at=? WHERE id=?`, boolInt(enabled), time.Now().UTC().Format(time.RFC3339), id)
-	return err
+	return s.ToggleContext(context.Background(), id, enabled)
 }
 func (s *Service) Rename(id int64, name string) error {
 	if strings.TrimSpace(name) == "" {
@@ -97,7 +122,14 @@ func (s *Service) RenameLocalLink(id int64, raw, name string) error {
 		return errors.New("name required")
 	}
 	raw = subconv.WithName(raw, name)
-	_, err := s.db.Exec(`UPDATE nodes SET node_name=?,raw_link=?,node_hash=?,updated_at=? WHERE id=?`, name, raw, subconv.StableHash(raw), time.Now().UTC().Format(time.RFC3339), id)
+	base := name
+	if i := strings.LastIndex(base, "-"); i > 0 {
+		if _, err := strconv.Atoi(base[i+1:]); err == nil {
+			base = base[:i]
+		}
+	}
+	newDisp := fmt.Sprintf("%s-01", base)
+	_, err := s.db.Exec(`UPDATE nodes SET node_name=?,display_no=?,raw_link=?,node_hash=?,updated_at=? WHERE id=?`, name, newDisp, raw, subconv.StableHash(raw), time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 

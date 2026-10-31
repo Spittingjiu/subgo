@@ -22,14 +22,17 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/subconv"
 )
 
 type Service struct {
-	db     *sql.DB
-	client *http.Client
+	db      *sql.DB
+	client  *http.Client
+	syncMu  sync.Mutex
+	syncing map[int64]bool
 }
 type Source struct {
 	ID             int64   `json:"id"`
@@ -59,7 +62,11 @@ func New(db *sql.DB) *Service {
 	return &Service{db: db, client: &http.Client{Timeout: 12 * time.Second}}
 }
 func (s *Service) List() ([]Source, error) {
-	rows, err := s.db.Query(`SELECT s.id,s.name,s.source_type,s.panel_url,s.panel_token,s.enabled,s.last_sync_at,s.last_sync_status,s.created_at,s.updated_at,COALESCE(s.sui_flavor,''), COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=s.id),0) as node_count FROM sources s ORDER BY s.id ASC`)
+	return s.ListContext(context.Background())
+}
+
+func (s *Service) ListContext(ctx context.Context) ([]Source, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.name,s.source_type,s.panel_url,s.panel_token,s.enabled,s.last_sync_at,s.last_sync_status,s.created_at,s.updated_at,COALESCE(s.sui_flavor,''), COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=s.id),0) as node_count FROM sources s ORDER BY s.id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -84,12 +91,12 @@ func (s *Service) List() ([]Source, error) {
 	}
 	return out, rows.Err()
 }
-func (s *Service) detectSuiFlavor(src Source) string {
+func (s *Service) detectSuiFlavorContext(parent context.Context, src Source) string {
 	if src.Type != "sui_api" || strings.TrimSpace(src.PanelURL) == "" {
 		return ""
 	}
 	base := strings.TrimRight(src.PanelURL, "/")
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parent, 1500*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", base+"/auth/me", nil)
 	if err != nil {
@@ -114,10 +121,14 @@ func (s *Service) detectSuiFlavor(src Source) string {
 }
 
 func (s *Service) Get(id int64) (Source, error) {
+	return s.GetContext(context.Background(), id)
+}
+
+func (s *Service) GetContext(ctx context.Context, id int64) (Source, error) {
 	var x Source
 	var en int
 	var l sql.NullString
-	err := s.db.QueryRow(`SELECT id,name,source_type,panel_url,panel_token,enabled,last_sync_at,last_sync_status,created_at,updated_at,COALESCE(sui_flavor,''), COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=sources.id),0) as node_count FROM sources WHERE id=?`, id).Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.SUIFlavor, &x.NodeCount)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,source_type,panel_url,panel_token,enabled,last_sync_at,last_sync_status,created_at,updated_at,COALESCE(sui_flavor,''), COALESCE((SELECT COUNT(*) FROM nodes WHERE source_id=sources.id),0) as node_count FROM sources WHERE id=?`, id).Scan(&x.ID, &x.Name, &x.Type, &x.PanelURL, &x.PanelToken, &en, &l, &x.LastSyncStatus, &x.CreatedAt, &x.UpdatedAt, &x.SUIFlavor, &x.NodeCount)
 	x.Enabled = en == 1
 	if x.SUIFlavor == "" && x.Type == "sui_api" {
 		x.SUIFlavor = "unknown"
@@ -190,35 +201,31 @@ func (s *Service) Delete(id int64) error {
 	return err
 }
 func (s *Service) SyncAll() map[int64]string {
-	rows, err := s.db.Query(`SELECT id FROM sources WHERE source_type!='local' AND enabled=1 ORDER BY id`)
+	out, err := s.SyncAllContext(context.Background())
 	if err != nil {
-		return map[int64]string{-1: err.Error()}
+		out[-1] = err.Error()
 	}
-	defer rows.Close()
-	ids := []int64{}
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return map[int64]string{-1: err.Error()}
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return map[int64]string{-1: err.Error()}
-	}
-	if err := rows.Close(); err != nil {
-		return map[int64]string{-1: err.Error()}
-	}
+	return out
+}
+
+// SyncAllContext uses the same per-source guard as direct and task-based syncs.
+func (s *Service) SyncAllContext(ctx context.Context) (map[int64]string, error) {
+	ids, err := s.ResolveSyncScope(ctx, nil)
 	out := map[int64]string{}
+	if err != nil {
+		return out, err
+	}
 	for _, id := range ids {
-		r := s.Sync(id)
-		if r != nil {
-			out[id] = r.Error()
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		if err := s.SyncContext(ctx, id); err != nil {
+			out[id] = err.Error()
 		} else {
 			out[id] = "ok"
 		}
 	}
-	return out
+	return out, nil
 }
 
 // errEmptyFetch marks a sync that returned no usable links while the source
@@ -226,16 +233,33 @@ func (s *Service) SyncAll() map[int64]string {
 var errEmptyFetch = errors.New("upstream returned no links")
 
 func (s *Service) Sync(id int64) error {
-	src, err := s.Get(id)
+	return s.SyncContext(context.Background(), id)
+}
+
+func (s *Service) SyncContext(ctx context.Context, id int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return ErrInvalidScope
+	}
+	if !s.beginSync(id) {
+		return ErrSyncInProgress
+	}
+	defer s.endSync(id)
+	src, err := s.GetContext(ctx, id)
 	if err != nil {
 		return err
 	}
 	if src.Type == "local" {
 		return nil
 	}
+	if !src.Enabled {
+		return ErrSourceDisabled
+	}
 	flavor := src.SUIFlavor
 	if src.Type == "sui_api" {
-		f := s.detectSuiFlavor(src)
+		f := s.detectSuiFlavorContext(ctx, src)
 		if f == "go" || f == "node" {
 			flavor = f
 		} else if flavor == "" {
@@ -244,12 +268,25 @@ func (s *Service) Sync(id int64) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	links, err := s.fetchLinks(src)
+	links, err := s.fetchLinksContext(ctx, src)
 	if err != nil {
-		s.setSyncStatus(id, now, err.Error(), flavor)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+			s.setSyncStatus(id, now, "cancelled", flavor)
+		} else {
+			s.setSyncStatus(id, now, err.Error(), flavor)
+		}
 		return err
 	}
-	if err := s.upsertNodes(id, links); err != nil {
+	if err := ctx.Err(); err != nil {
+		s.setSyncStatus(id, now, "cancelled", flavor)
+		return err
+	}
+	if err := s.upsertNodesContext(ctx, id, links); err != nil {
+		if ctx.Err() != nil {
+			s.setSyncStatus(id, now, "cancelled", flavor)
+			return ctx.Err()
+		}
 		if errors.Is(err, errEmptyFetch) {
 			kept := s.countNodes(id)
 			msg := fmt.Sprintf("empty upstream result, kept %d existing node(s)", kept)
@@ -260,12 +297,18 @@ func (s *Service) Sync(id int64) error {
 		s.setSyncStatus(id, now, err.Error(), flavor)
 		return err
 	}
-	s.setSyncStatus(id, now, fmt.Sprintf("ok (%d nodes)", len(links)), flavor)
-	return nil
+	return s.setSyncStatusContext(ctx, id, now, fmt.Sprintf("ok (%d nodes)", len(links)), flavor)
 }
 
 func (s *Service) setSyncStatus(id int64, now, status, flavor string) {
-	_, _ = s.db.Exec(`UPDATE sources SET last_sync_at=?,last_sync_status=?,sui_flavor=?,updated_at=? WHERE id=?`, now, status, flavor, now, id)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.setSyncStatusContext(ctx, id, now, status, flavor)
+}
+
+func (s *Service) setSyncStatusContext(ctx context.Context, id int64, now, status, flavor string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sources SET last_sync_at=?,last_sync_status=?,sui_flavor=?,updated_at=? WHERE id=?`, now, status, flavor, now, id)
+	return err
 }
 
 func (s *Service) countNodes(sourceID int64) int {
@@ -273,22 +316,22 @@ func (s *Service) countNodes(sourceID int64) int {
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE source_id=?`, sourceID).Scan(&n)
 	return n
 }
-func (s *Service) fetchLinks(src Source) ([]string, error) {
+func (s *Service) fetchLinksContext(ctx context.Context, src Source) ([]string, error) {
 	switch src.Type {
 	case "cf_sub", "raw_sub":
-		return s.fetchSubURL(src.PanelURL, src.PanelToken)
+		return s.fetchSubURLContext(ctx, src.PanelURL, src.PanelToken)
 	case "sbui":
-		return s.fetchSbuiLinks(src)
+		return s.fetchSbuiLinksContext(ctx, src)
 	case "sui_api":
-		return s.fetchSuiLinks(src)
+		return s.fetchSuiLinksContext(ctx, src)
 	case "xui", "3x_ui":
-		return s.fetch3XUILinks(src)
+		return s.fetch3XUILinksContext(ctx, src)
 	default:
 		return nil, fmt.Errorf("unsupported source type %s", src.Type)
 	}
 }
-func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
-	inb, err := s.SuiJSON(src, "/api/inbounds", "GET", nil)
+func (s *Service) fetchSuiLinksContext(ctx context.Context, src Source) ([]string, error) {
+	inb, err := s.SuiJSONContext(ctx, src, "/api/inbounds", "GET", nil)
 	if err == nil {
 		if ok, _ := inb["success"].(bool); ok {
 			if arr, ok := inb["obj"].([]any); ok {
@@ -303,7 +346,7 @@ func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
 					if id == "" || id == "<nil>" {
 						continue
 					}
-					lj, er := s.SuiJSON(src, "/api/inbounds/"+id+"/links", "GET", nil)
+					lj, er := s.SuiJSONContext(ctx, src, "/api/inbounds/"+id+"/links", "GET", nil)
 					if er != nil {
 						linkErrs++
 						continue
@@ -323,9 +366,48 @@ func (s *Service) fetchSuiLinks(src Source) ([]string, error) {
 			}
 		}
 	}
-	return s.fetchSubURL(src.PanelURL, src.PanelToken)
+	return s.fetchSubURLContext(ctx, src.PanelURL, src.PanelToken)
 }
-func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
+func (s *Service) fetchSbuiLinksContext(ctx context.Context, src Source) ([]string, error) {
+	inb, err := s.SbuiJSONContext(ctx, src, "/api/v1/inbounds", "GET", nil)
+	if err == nil {
+		if ok, _ := inb["ok"].(bool); ok {
+			arr := firstArray(inb, "obj", "inbounds")
+			if len(arr) == 0 {
+				return []string{}, nil
+			}
+			var links []string
+			var linkErrs int
+			for _, one := range arr {
+				m, _ := one.(map[string]any)
+				id := fmt.Sprint(m["id"])
+				if id == "" || id == "<nil>" {
+					continue
+				}
+				if en, exists := m["enabled"]; exists && fmt.Sprint(en) == "false" {
+					continue
+				}
+				lj, er := s.SbuiJSONContext(ctx, src, "/api/v1/inbounds/"+id+"/links", "GET", nil)
+				if er != nil {
+					linkErrs++
+					continue
+				}
+				a := firstArray(lj, "links", "obj")
+				for _, v := range a {
+					if str := strings.TrimSpace(fmt.Sprint(v)); strings.Contains(str, "://") {
+						links = append(links, str)
+					}
+				}
+			}
+			if len(links) > 0 {
+				return subconv.ParseSubscriptionText(strings.Join(links, "\n")), nil
+			}
+			if len(arr) > 0 && linkErrs > 0 && len(links) == 0 {
+				log.Printf("[source-sync] sbui source %d inbounds link fetch had errors, falling back to /sub/default", src.ID)
+			}
+		}
+	}
+
 	u := src.PanelURL
 	if !strings.Contains(u, "/api/v1/sub/") {
 		u = strings.TrimRight(u, "/") + "/api/v1/sub/default"
@@ -335,23 +417,23 @@ func (s *Service) fetchSbuiLinks(src Source) ([]string, error) {
 		// SBUI default subscription is public; credentials are for management APIs.
 		token = ""
 	}
-	return s.fetchSubURL(u, token)
+	return s.fetchSubURLContext(ctx, u, token)
 }
-func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
+func (s *Service) fetch3XUILinksContext(ctx context.Context, src Source) ([]string, error) {
 	allSettings := map[string]any{}
-	if j, err := s.XUIJSON(src, "/panel/setting/all", "POST", nil); err == nil {
+	if j, err := s.XUIJSONContext(ctx, src, "/panel/setting/all", "POST", nil); err == nil {
 		if m, ok := j["obj"].(map[string]any); ok {
 			allSettings = m
 		}
 	}
 	defaultSettings := map[string]any{}
-	if j, err := s.XUIJSON(src, "/panel/setting/defaultSettings", "POST", nil); err == nil {
+	if j, err := s.XUIJSONContext(ctx, src, "/panel/setting/defaultSettings", "POST", nil); err == nil {
 		if m, ok := j["obj"].(map[string]any); ok {
 			defaultSettings = m
 		}
 	}
 	baseSubURLs := xuiSubscriptionBases(src.PanelURL, allSettings, defaultSettings)
-	j, err := s.XUIJSON(src, "/panel/api/inbounds/list", "GET", nil)
+	j, err := s.XUIJSONContext(ctx, src, "/panel/api/inbounds/list", "GET", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +454,7 @@ func (s *Service) fetch3XUILinks(src Source) ([]string, error) {
 			var lastErr error
 			for _, baseSubURL := range baseSubURLs {
 				subURL := strings.TrimRight(baseSubURL, "/") + "/" + url.PathEscape(sid)
-				subLinks, err := s.fetchSubURL(subURL, "")
+				subLinks, err := s.fetchSubURLContext(ctx, subURL, "")
 				if err != nil {
 					lastErr = err
 					continue
@@ -465,11 +547,14 @@ func xuiSubIDsFromInbound(inb map[string]any) []string {
 	return out
 }
 
-func (s *Service) fetchSubURL(raw, token string) ([]string, error) {
-	if err := AssertURLSafe(raw); err != nil {
+func (s *Service) fetchSubURLContext(ctx context.Context, raw, token string) ([]string, error) {
+	if err := AssertURLSafeContext(ctx, raw); err != nil {
 		return nil, err
 	}
-	req, _ := http.NewRequestWithContext(context.Background(), "GET", raw, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", raw, nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("User-Agent", "subgo/0.4")
 	req.Header.Set("Accept", "text/plain,*/*")
 	if token != "" {
@@ -490,6 +575,10 @@ func (s *Service) fetchSubURL(raw, token string) ([]string, error) {
 	return subconv.ParseSubscriptionText(string(b)), nil
 }
 func (s *Service) upsertNodes(sourceID int64, links []string) error {
+	return s.upsertNodesContext(context.Background(), sourceID, links)
+}
+
+func (s *Service) upsertNodesContext(ctx context.Context, sourceID int64, links []string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	type incoming struct {
 		raw      string
@@ -516,7 +605,7 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 		list = append(list, incoming{raw: raw, hash: h, identity: subconv.NodeIdentity(raw), name: p.Name, protocol: p.Protocol})
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -609,7 +698,7 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 				continue
 			}
 		}
-		disp := nextDisplayNo(tx, sourceID)
+		disp := nextDisplayNo(tx, sourceID, in.name)
 		if _, err := tx.Exec(`INSERT INTO nodes(source_id,display_no,node_hash,raw_link,node_name,protocol,enabled,identity,missing_since,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,'',?,?)`, sourceID, disp, in.hash, in.raw, in.name, in.protocol, in.identity, now, now); err != nil {
 			return err
 		}
@@ -662,9 +751,18 @@ func (s *Service) upsertNodes(sourceID int64, links []string) error {
 // nextDisplayNo derives the next short label from existing labels instead of a
 // row count: counting collides as soon as any node was deleted, which used to
 // hand two nodes the same display number.
-func nextDisplayNo(tx *sql.Tx, sourceID int64) string {
-	rows, err := tx.Query(`SELECT COALESCE(display_no,'') FROM nodes WHERE source_id=?`, sourceID)
-	max := 0
+func nextDisplayNo(tx *sql.Tx, sourceID int64, nodeName string) string {
+	base := strings.TrimSpace(nodeName)
+	if base == "" {
+		base = fmt.Sprintf("Node%02d", sourceID)
+	}
+	if i := strings.LastIndex(base, "-"); i > 0 {
+		if _, err := strconv.Atoi(base[i+1:]); err == nil {
+			base = base[:i]
+		}
+	}
+	rows, err := tx.Query(`SELECT COALESCE(display_no,'') FROM nodes WHERE display_no LIKE ?`, base+"-%")
+	used := make(map[int]bool)
 	if err == nil {
 		for rows.Next() {
 			var label string
@@ -672,14 +770,18 @@ func nextDisplayNo(tx *sql.Tx, sourceID int64) string {
 				continue
 			}
 			if i := strings.LastIndex(label, "-"); i >= 0 {
-				if n, err := strconv.Atoi(label[i+1:]); err == nil && n > max {
-					max = n
+				if n, err := strconv.Atoi(label[i+1:]); err == nil && n > 0 {
+					used[n] = true
 				}
 			}
 		}
 		rows.Close()
 	}
-	return fmt.Sprintf("S%d-%03d", sourceID, max+1)
+	seq := 1
+	for used[seq] {
+		seq++
+	}
+	return fmt.Sprintf("%s-%02d", base, seq)
 }
 
 // nodeMissingGrace is how long a node may be absent from the upstream answer
@@ -1153,35 +1255,43 @@ func xuiClientKey(protocol string, client map[string]any) string {
 	}
 }
 func (s *Service) SuiJSON(src Source, path, method string, body any) (map[string]any, error) {
+	return s.SuiJSONContext(context.Background(), src, path, method, body)
+}
+
+func (s *Service) SuiJSONContext(ctx context.Context, src Source, path, method string, body any) (map[string]any, error) {
 	base := strings.TrimRight(src.PanelURL, "/")
-	if err := AssertURLSafe(base); err != nil {
+	if err := AssertURLSafeContext(ctx, base); err != nil {
 		return nil, err
 	}
 	token := src.PanelToken
 	if isUserPassToken(token) {
 		var err error
-		token, err = s.suiPermanentToken(base, token)
+		token, err = s.suiPermanentTokenContext(ctx, base, token)
 		if err != nil {
 			return nil, err
 		}
-		_, _ = s.db.Exec(`UPDATE sources SET panel_token=?,updated_at=? WHERE id=?`, token, time.Now().UTC().Format(time.RFC3339), src.ID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE sources SET panel_token=?,updated_at=? WHERE id=?`, token, time.Now().UTC().Format(time.RFC3339), src.ID)
 	}
 	h := map[string]string{"x-panel-token": token, "authorization": "Bearer " + token, "content-type": "application/json", "accept": "application/json"}
-	return s.SignedJSONRequest(base, path, method, h, body, token)
+	return s.SignedJSONRequestContext(ctx, base, path, method, h, body, token)
 }
 func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[string]any, error) {
+	return s.SbuiJSONContext(context.Background(), src, path, method, body)
+}
+
+func (s *Service) SbuiJSONContext(ctx context.Context, src Source, path, method string, body any) (map[string]any, error) {
 	base := normalizeSbuiBase(src.PanelURL)
-	if err := AssertURLSafe(base); err != nil {
+	if err := AssertURLSafeContext(ctx, base); err != nil {
 		return nil, err
 	}
 	token := src.PanelToken
 	if isUserPassToken(token) {
 		var err error
-		token, err = s.sbuiLogin(base, token)
+		token, err = s.sbuiLoginContext(ctx, base, token)
 		if err != nil {
 			return nil, err
 		}
-		_, _ = s.db.Exec(`UPDATE sources SET panel_token=?,updated_at=? WHERE id=?`, token, time.Now().UTC().Format(time.RFC3339), src.ID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE sources SET panel_token=?,updated_at=? WHERE id=?`, token, time.Now().UTC().Format(time.RFC3339), src.ID)
 	}
 	h := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}
 	if token != "" {
@@ -1190,34 +1300,42 @@ func (s *Service) SbuiJSON(src Source, path, method string, body any) (map[strin
 	if body != nil {
 		h["content-type"] = "application/json"
 	}
-	return s.SignedJSONRequest(base, path, method, h, body, token)
+	return s.SignedJSONRequestContext(ctx, base, path, method, h, body, token)
 }
 
 func (s *Service) XUIJSON(src Source, path, method string, body any) (map[string]any, error) {
+	return s.XUIJSONContext(context.Background(), src, path, method, body)
+}
+
+func (s *Service) XUIJSONContext(ctx context.Context, src Source, path, method string, body any) (map[string]any, error) {
 	base := strings.TrimRight(src.PanelURL, "/")
-	if err := AssertURLSafe(base); err != nil {
+	if err := AssertURLSafeContext(ctx, base); err != nil {
 		return nil, err
 	}
-	apiBase := s.resolveXUIBase(base)
+	apiBase := s.resolveXUIBaseContext(ctx, base)
 	headers := map[string]string{"accept": "application/json", "user-agent": "subgo/0.4", "x-requested-with": "XMLHttpRequest"}
 	if body != nil {
 		headers["content-type"] = "application/json"
 	}
 	if tok := strings.TrimSpace(src.PanelToken); tok != "" && !isUserPassToken(tok) {
 		headers["authorization"] = "Bearer " + tok
-		return s.JSONRequestWithBytes(apiBase+path, method, headers, bodyBytes(body))
+		return s.JSONRequestWithBytesContext(ctx, apiBase+path, method, headers, bodyBytes(body))
 	}
-	client, csrf, err := s.xuiLoginClient(apiBase, src.PanelToken)
+	client, csrf, err := s.xuiLoginClientContext(ctx, apiBase, src.PanelToken)
 	if err != nil {
 		return nil, err
 	}
 	if csrf != "" && method != "GET" && method != "HEAD" && method != "OPTIONS" {
 		headers["x-csrf-token"] = csrf
 	}
-	return s.JSONRequestWithClient(client, apiBase+path, method, headers, bodyBytes(body))
+	return s.JSONRequestWithClientContext(ctx, client, apiBase+path, method, headers, bodyBytes(body))
 }
 
 func (s *Service) resolveXUIBase(base string) string {
+	return s.resolveXUIBaseContext(context.Background(), base)
+}
+
+func (s *Service) resolveXUIBaseContext(ctx context.Context, base string) string {
 	base = xuiPanelAPIBase(base)
 	u, err := url.Parse(base)
 	if err != nil || strings.Trim(u.Path, "/") != "" {
@@ -1226,8 +1344,8 @@ func (s *Service) resolveXUIBase(base string) string {
 	// 3x-ui installations normally hide the panel behind a random webBasePath.
 	// If the user enters only the origin (https://host), discover that path from
 	// the root redirect and use it for all panel API/login requests.
-	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequest("GET", strings.TrimRight(base, "/")+"/", nil)
+	client := &http.Client{Transport: s.client.Transport, Timeout: 4 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(base, "/")+"/", nil)
 	if err != nil {
 		return base
 	}
@@ -1273,14 +1391,18 @@ func xuiPanelAPIBase(base string) string {
 }
 
 func (s *Service) xuiLoginClient(base, userPass string) (*http.Client, string, error) {
+	return s.xuiLoginClientContext(context.Background(), base, userPass)
+}
+
+func (s *Service) xuiLoginClientContext(ctx context.Context, base, userPass string) (*http.Client, string, error) {
 	parts := strings.SplitN(userPass, ":", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
 		return nil, "", errors.New("invalid 3x-ui credential, expected username:password or API token")
 	}
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Timeout: s.client.Timeout, Jar: jar}
+	client := &http.Client{Transport: s.client.Transport, Timeout: s.client.Timeout, Jar: jar}
 	csrf := ""
-	if j, err := s.JSONRequestWithClient(client, strings.TrimRight(base, "/")+"/csrf-token", "GET", map[string]string{"accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}, nil); err == nil {
+	if j, err := s.JSONRequestWithClientContext(ctx, client, strings.TrimRight(base, "/")+"/csrf-token", "GET", map[string]string{"accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}, nil); err == nil {
 		csrf = strings.TrimSpace(fmt.Sprint(firstVal(j, "obj", "token")))
 	}
 	form := url.Values{}
@@ -1290,7 +1412,7 @@ func (s *Service) xuiLoginClient(base, userPass string) (*http.Client, string, e
 	if csrf != "" {
 		headers["x-csrf-token"] = csrf
 	}
-	j, err := s.JSONRequestWithClient(client, strings.TrimRight(base, "/")+"/login", "POST", headers, []byte(form.Encode()))
+	j, err := s.JSONRequestWithClientContext(ctx, client, strings.TrimRight(base, "/")+"/login", "POST", headers, []byte(form.Encode()))
 	if err != nil {
 		return nil, "", err
 	}
@@ -1298,7 +1420,7 @@ func (s *Service) xuiLoginClient(base, userPass string) (*http.Client, string, e
 		return nil, "", fmt.Errorf("3x-ui login failed: %s", strings.TrimSpace(fmt.Sprint(j["msg"])))
 	}
 	if csrf == "" {
-		if j, err := s.JSONRequestWithClient(client, strings.TrimRight(base, "/")+"/panel/csrf-token", "GET", map[string]string{"accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}, nil); err == nil {
+		if j, err := s.JSONRequestWithClientContext(ctx, client, strings.TrimRight(base, "/")+"/panel/csrf-token", "GET", map[string]string{"accept": "application/json", "x-requested-with": "XMLHttpRequest", "user-agent": "subgo/0.4"}, nil); err == nil {
 			csrf = strings.TrimSpace(fmt.Sprint(firstVal(j, "obj", "token")))
 		}
 	}
@@ -1306,14 +1428,18 @@ func (s *Service) xuiLoginClient(base, userPass string) (*http.Client, string, e
 }
 
 func (s *Service) suiPermanentToken(base, userPass string) (string, error) {
+	return s.suiPermanentTokenContext(context.Background(), base, userPass)
+}
+
+func (s *Service) suiPermanentTokenContext(ctx context.Context, base, userPass string) (string, error) {
 	parts := strings.SplitN(userPass, ":", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
 		return "", errors.New("invalid SUI-Go credential, expected username:password")
 	}
-	j, err := s.JSONRequest(strings.TrimRight(base, "/")+"/auth/api-token", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
+	j, err := s.JSONRequestContext(ctx, strings.TrimRight(base, "/")+"/auth/api-token", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
 	if err != nil {
 		// Backward-compatible fallback for old SUI-Go builds; token may be a session token there.
-		j, err = s.JSONRequest(strings.TrimRight(base, "/")+"/auth/login", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
+		j, err = s.JSONRequestContext(ctx, strings.TrimRight(base, "/")+"/auth/login", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
 		if err != nil {
 			return "", err
 		}
@@ -1330,11 +1456,15 @@ func isUserPassToken(token string) bool {
 }
 
 func (s *Service) sbuiLogin(base, userPass string) (string, error) {
+	return s.sbuiLoginContext(context.Background(), base, userPass)
+}
+
+func (s *Service) sbuiLoginContext(ctx context.Context, base, userPass string) (string, error) {
 	parts := strings.SplitN(userPass, ":", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
 		return "", errors.New("invalid SBUI credential, expected username:password")
 	}
-	j, err := s.JSONRequest(strings.TrimRight(base, "/")+"/api/v1/login", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
+	j, err := s.JSONRequestContext(ctx, strings.TrimRight(base, "/")+"/api/v1/login", "POST", map[string]string{"content-type": "application/json", "accept": "application/json", "user-agent": "subgo/0.4"}, map[string]any{"username": strings.TrimSpace(parts[0]), "password": parts[1]})
 	if err != nil {
 		return "", err
 	}
@@ -1369,8 +1499,12 @@ func signPayload(token, method, path, bodyHash, nonce, ts string) string {
 }
 
 func (s *Service) challenge(base string) (string, string, error) {
+	return s.challengeContext(context.Background(), base)
+}
+
+func (s *Service) challengeContext(ctx context.Context, base string) (string, string, error) {
 	for _, p := range []string{"/auth/challenge", "/api/v1/auth/challenge"} {
-		j, err := s.JSONRequest(strings.TrimRight(base, "/")+p, "GET", map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}, nil)
+		j, err := s.JSONRequestContext(ctx, strings.TrimRight(base, "/")+p, "GET", map[string]string{"accept": "application/json", "user-agent": "subgo/0.4"}, nil)
 		if err == nil {
 			nonce := strings.TrimSpace(fmt.Sprint(firstVal(j, "nonce")))
 			ts := strings.TrimSpace(fmt.Sprint(firstVal(j, "timestamp")))
@@ -1383,10 +1517,14 @@ func (s *Service) challenge(base string) (string, string, error) {
 }
 
 func (s *Service) SignedJSONRequest(base, path, method string, headers map[string]string, body any, token string) (map[string]any, error) {
+	return s.SignedJSONRequestContext(context.Background(), base, path, method, headers, body, token)
+}
+
+func (s *Service) SignedJSONRequestContext(ctx context.Context, base, path, method string, headers map[string]string, body any, token string) (map[string]any, error) {
 	bb := bodyBytes(body)
 	bodyHash := sha256Hex(bb)
 	if strings.TrimSpace(token) != "" {
-		if nonce, ts, err := s.challenge(base); err == nil {
+		if nonce, ts, err := s.challengeContext(ctx, base); err == nil {
 			h := map[string]string{"accept": "application/json", "content-type": "application/json", "user-agent": "subgo/0.4"}
 			for k, v := range headers {
 				if strings.ToLower(k) != "authorization" && strings.ToLower(k) != "x-panel-token" {
@@ -1398,23 +1536,30 @@ func (s *Service) SignedJSONRequest(base, path, method string, headers map[strin
 			h["x-panel-timestamp"] = ts
 			h["x-panel-body-sha256"] = bodyHash
 			h["x-panel-signature"] = signPayload(token, method, path, bodyHash, nonce, ts)
-			if j, err := s.JSONRequestWithBytes(strings.TrimRight(base, "/")+path, method, h, bb); err == nil {
+			if j, err := s.JSONRequestWithBytesContext(ctx, strings.TrimRight(base, "/")+path, method, h, bb); err == nil {
 				return j, nil
 			}
 		}
 	}
-	return s.JSONRequestWithBytes(strings.TrimRight(base, "/")+path, method, headers, bb)
+	return s.JSONRequestWithBytesContext(ctx, strings.TrimRight(base, "/")+path, method, headers, bb)
 }
 
 func (s *Service) JSONRequestWithBytes(raw, method string, headers map[string]string, bb []byte) (map[string]any, error) {
-	if err := AssertURLSafe(raw); err != nil {
+	return s.JSONRequestWithBytesContext(context.Background(), raw, method, headers, bb)
+}
+
+func (s *Service) JSONRequestWithBytesContext(ctx context.Context, raw, method string, headers map[string]string, bb []byte) (map[string]any, error) {
+	if err := AssertURLSafeContext(ctx, raw); err != nil {
 		return nil, err
 	}
 	var br io.Reader
 	if bb != nil {
 		br = bytes.NewReader(bb)
 	}
-	req, _ := http.NewRequest(method, raw, br)
+	req, err := http.NewRequestWithContext(ctx, method, raw, br)
+	if err != nil {
+		return nil, err
+	}
 	for k, v := range headers {
 		if v != "" {
 			req.Header.Set(k, v)
@@ -1441,14 +1586,21 @@ func (s *Service) JSONRequestWithBytes(raw, method string, headers map[string]st
 }
 
 func (s *Service) JSONRequestWithClient(client *http.Client, raw, method string, headers map[string]string, bb []byte) (map[string]any, error) {
-	if err := AssertURLSafe(raw); err != nil {
+	return s.JSONRequestWithClientContext(context.Background(), client, raw, method, headers, bb)
+}
+
+func (s *Service) JSONRequestWithClientContext(ctx context.Context, client *http.Client, raw, method string, headers map[string]string, bb []byte) (map[string]any, error) {
+	if err := AssertURLSafeContext(ctx, raw); err != nil {
 		return nil, err
 	}
 	var br io.Reader
 	if bb != nil {
 		br = bytes.NewReader(bb)
 	}
-	req, _ := http.NewRequest(method, raw, br)
+	req, err := http.NewRequestWithContext(ctx, method, raw, br)
+	if err != nil {
+		return nil, err
+	}
 	for k, v := range headers {
 		if v != "" {
 			req.Header.Set(k, v)
@@ -1475,7 +1627,11 @@ func (s *Service) JSONRequestWithClient(client *http.Client, raw, method string,
 }
 
 func (s *Service) JSONRequest(raw, method string, headers map[string]string, body any) (map[string]any, error) {
-	return s.JSONRequestWithBytes(raw, method, headers, bodyBytes(body))
+	return s.JSONRequestContext(context.Background(), raw, method, headers, body)
+}
+
+func (s *Service) JSONRequestContext(ctx context.Context, raw, method string, headers map[string]string, body any) (map[string]any, error) {
+	return s.JSONRequestWithBytesContext(ctx, raw, method, headers, bodyBytes(body))
 }
 func normalizeSbuiBase(raw string) string {
 	base := strings.TrimRight(raw, "/")
@@ -1612,6 +1768,13 @@ func toInt64(v any) int64 {
 }
 
 func AssertURLSafe(raw string) error {
+	return AssertURLSafeContext(context.Background(), raw)
+}
+
+func AssertURLSafeContext(ctx context.Context, raw string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
@@ -1620,12 +1783,16 @@ func AssertURLSafe(raw string) error {
 		return errors.New("only http/https allowed")
 	}
 	host := u.Hostname()
-	ips, err := net.LookupIP(host)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
 		return err
 	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		// Allow loopback (127.0.0.1, ::1) so subgo can connect to local panel services on the same host
+		if ip.IsLoopback() {
+			continue
+		}
+		if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 			return fmt.Errorf("blocked private ip %s", ip.String())
 		}
 		if ip.String() == "169.254.169.254" {

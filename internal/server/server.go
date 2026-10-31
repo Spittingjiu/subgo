@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +20,7 @@ import (
 	"github.com/Spittingjiu/subgo/internal/models"
 	"github.com/Spittingjiu/subgo/internal/services/auth"
 	"github.com/Spittingjiu/subgo/internal/services/connectivity"
+	"github.com/Spittingjiu/subgo/internal/services/jobs"
 	"github.com/Spittingjiu/subgo/internal/services/logs"
 	"github.com/Spittingjiu/subgo/internal/services/node"
 	"github.com/Spittingjiu/subgo/internal/services/source"
@@ -30,7 +29,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const Version = "0.9.0-dev"
+const Version = "0.9.1-dev+20261025.4-8"
 
 type Server struct {
 	cfg          config.Config
@@ -44,10 +43,19 @@ type Server struct {
 	router       *gin.Engine
 	templateData []byte
 	templateMu   sync.RWMutex
-	sourceSyncMu sync.Mutex
+	taskSvc      *jobs.Service
+	ctx          context.Context
+	cancel       context.CancelFunc
+	backgroundWG sync.WaitGroup
+	httpServer   *http.Server
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func New(cfg config.Config) (*Server, error) {
+	if err := cfg.ValidateSecurity(); err != nil {
+		return nil, err
+	}
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
 		return nil, err
@@ -55,14 +63,37 @@ func New(cfg config.Config) (*Server, error) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery(), requestID(), accessHeaders())
-	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), logs: logs.New(database.DB), router: r}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{cfg: cfg, db: database, auth: auth.New(database.DB, cfg.SessionSecret), nodes: node.New(database.DB), subs: subscription.New(database.DB), sourceSvc: source.New(database.DB), conn: connectivity.New(database.DB), logs: logs.New(database.DB), router: r, ctx: ctx, cancel: cancel}
+	if err := s.auth.Ready(); err != nil {
+		cancel()
+		s.logs.Stop()
+		_ = database.Close()
+		return nil, err
+	}
+	startupCtx, startupCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer startupCancel()
+	if err := s.conn.EnsureSchemaContext(startupCtx); err != nil {
+		cancel()
+		s.logs.Stop()
+		_ = database.Close()
+		return nil, err
+	}
+	s.taskSvc, err = jobs.New(database.DB, s.sourceSvc, s.conn)
+	if err != nil {
+		cancel()
+		s.logs.Stop()
+		_ = database.Close()
+		return nil, err
+	}
+	s.httpServer = &http.Server{Addr: cfg.Addr, Handler: r, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	// Mirror the process log into the panel's 运行日志, so failures that used to
 	// reach only journald (template refresh, source sync) are visible in the UI.
 	log.SetOutput(io.MultiWriter(os.Stderr, s.logs.Sink()))
-	r.Use(s.auditMutations())
+	r.Use(s.securityMiddleware(), s.auditMutations())
 	s.logs.Info("app", "服务启动 subgo "+Version)
 	s.routes()
-	go s.pruneLogsScheduler()
+	s.startBackground(s.pruneLogsScheduler)
 	// Migrate existing subscriptions from integer node IDs to stable node_hash strings.
 	if n, err := s.migrateSubNodeIDsToHashes(); err != nil {
 		log.Printf("[migration] node_ids→node_hashes error: %v", err)
@@ -78,8 +109,9 @@ func New(cfg config.Config) (*Server, error) {
 		log.Printf("[migration] normalized %d node hash reference(s)", n)
 	}
 	// Fetch clash template in background
-	go s.refreshClashTemplate()
-	go s.sourceSyncScheduler()
+	s.startBackground(s.refreshClashTemplate)
+	s.startBackground(s.sourceSyncScheduler)
+	s.startBackground(s.connectivityExpiryScheduler)
 	return s, nil
 }
 
@@ -92,8 +124,12 @@ func (s *Server) sourceSyncScheduler() {
 	timer := time.NewTimer(15 * time.Second)
 	defer timer.Stop()
 	for {
-		<-timer.C
-		s.runSourceSyncAll("scheduler")
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-timer.C:
+			s.runSourceSyncAll("scheduler")
+		}
 		timer.Reset(interval)
 	}
 }
@@ -104,8 +140,15 @@ func (s *Server) pruneLogsScheduler() {
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 	for {
+		if s.ctx.Err() != nil {
+			return
+		}
 		s.pruneLogsOnce()
-		<-ticker.C
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -125,38 +168,61 @@ func (s *Server) pruneLogsOnce() {
 }
 
 func (s *Server) runSourceSyncAll(reason string) (map[int64]string, bool) {
-	if !s.sourceSyncMu.TryLock() {
-		return map[int64]string{-1: "source sync already running"}, false
+	task, err := s.taskSvc.SubmitSync(s.ctx, nil, reason)
+	if err != nil {
+		return map[int64]string{-1: safeTaskError(err)}, false
 	}
-	defer s.sourceSyncMu.Unlock()
-	res := s.sourceSvc.SyncAll()
-	if reason != "" {
-		log.Printf("[source-sync] %s results=%v", reason, res)
+	task, err = s.taskSvc.Wait(s.ctx, task.ID)
+	if err != nil {
+		return map[int64]string{-1: safeTaskError(err)}, false
 	}
-	if pruned, err := s.subs.RepairOrphanNodeHashes(); err != nil {
-		log.Printf("[source-sync] prune orphan nodes error: %v", err)
-	} else if pruned > 0 {
-		log.Printf("[source-sync] pruned %d orphan node references from subscriptions", pruned)
-	}
+	// Do not repair/prune subscription selections as a side effect of a job.
+	// The pre-existing source upsert identity/snapshot algorithm is unchanged.
+	res := legacySyncResults(task)
+	log.Printf("[source-sync] trigger=%s task=%s status=%s succeeded=%d failed=%d", task.Trigger, task.ID, task.Status, task.Succeeded, task.Failed)
 	return res, true
 }
 
 func (s *Server) Handler() http.Handler { return s.router }
-func (s *Server) Run() error            { return http.ListenAndServe(s.cfg.Addr, s.router) }
+func (s *Server) Run() error {
+	err := s.httpServer.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
 func (s *Server) Close() error {
-	if s.logs != nil {
-		s.logs.Stop()
-	}
-	if s.db != nil {
-		return s.db.Close()
-	}
-	return nil
+	s.closeOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.taskSvc != nil {
+			s.closeErr = errors.Join(s.closeErr, s.taskSvc.Close())
+		}
+		if s.httpServer != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := s.httpServer.Shutdown(ctx); err != nil {
+				s.closeErr = errors.Join(s.closeErr, err, s.httpServer.Close())
+			}
+			cancel()
+		}
+		s.backgroundWG.Wait()
+		if s.logs != nil {
+			s.logs.Stop()
+		}
+		if s.db != nil {
+			s.closeErr = errors.Join(s.closeErr, s.db.Close())
+		}
+	})
+	return s.closeErr
 }
 
 func (s *Server) routes() {
 	s.router.GET("/", s.app)
 	s.router.GET("/app", s.app)
 	s.router.GET("/favicon.svg", s.favicon)
+	s.router.GET("/favicon.ico", s.favicon)
+	s.registerWebAssets()
 	s.router.GET("/about", s.home)
 	healthHandler := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "subgo", "ts": time.Now().UTC().Format(time.RFC3339)})
@@ -210,7 +276,7 @@ func (s *Server) routes() {
 	api.GET("/bridge/e2ee-meta", s.bridgeMeta)
 	api.GET("/nodes", s.listNodes)
 	api.POST("/local-nodes", s.createLocalNode)
-	api.POST("/nodes/:id/toggle", s.toggleNode)
+	api.POST("/nodes/:id/toggle", s.taskOriginGuard(), s.toggleNode)
 	api.PUT("/nodes/:id/rename", s.renameNode)
 	api.DELETE("/local-nodes/:id", s.deleteLocalNode)
 	api.DELETE("/local-nodes/:id/", s.deleteLocalNode)
@@ -218,6 +284,9 @@ func (s *Server) routes() {
 	api.POST("/subscriptions", s.createSubscription)
 	api.PUT("/subscriptions/:id", s.updateSubscription)
 	api.DELETE("/subscriptions/:id", s.deleteSubscription)
+	s.registerTaskRoutes(api)
+	s.registerSecurityRoutes(api)
+	s.registerConversionRoutes(api)
 }
 
 func (s *Server) login(c *gin.Context) {
@@ -232,12 +301,19 @@ func (s *Server) login(c *gin.Context) {
 		c.JSON(401, gin.H{"ok": false, "error": "invalid credentials"})
 		return
 	}
-	http.SetCookie(c.Writer, &http.Cookie{Name: "subgo_session", Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 7 * 24 * 3600, Secure: isHTTPS(c)})
+	if err := s.setManagementCookie(c, tok); err != nil {
+		_ = s.auth.RevokeSession(tok)
+		securityJSONError(c, http.StatusServiceUnavailable, "cannot establish management session")
+		return
+	}
 	s.audit("登录成功", "管理员", req.Username, "ip="+c.ClientIP())
 	c.JSON(200, gin.H{"ok": true, "username": req.Username})
 }
 func (s *Server) logout(c *gin.Context) {
-	http.SetCookie(c.Writer, &http.Cookie{Name: "subgo_session", Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Secure: isHTTPS(c)})
+	if err := s.logoutManagementSession(c); err != nil {
+		securityJSONError(c, http.StatusServiceUnavailable, "cannot revoke management session")
+		return
+	}
 	c.JSON(200, gin.H{"ok": true})
 }
 func (s *Server) me(c *gin.Context) {
@@ -270,18 +346,28 @@ func (s *Server) updateAdminUser(c *gin.Context) {
 		c.JSON(400, gin.H{"ok": false, "error": "bad json"})
 		return
 	}
-	cur, err := s.auth.Admin()
-	if err != nil {
-		jsonOK(c, err)
-		return
-	}
 	username := strings.TrimSpace(req.Username)
-	if username == "" {
-		username = cur.Username
-	}
-	if err := s.auth.UpdateAdmin(username, req.Password); err != nil {
-		jsonOK(c, err)
-		return
+	changed := false
+	// Retention-only writes must not send an earlier username snapshot back
+	// through the credential updater while another request changes accounts.
+	if username != "" || req.Password != "" {
+		if username == "" {
+			cur, err := s.auth.Admin()
+			if err != nil {
+				jsonOK(c, err)
+				return
+			}
+			username = cur.Username
+		}
+		var err error
+		changed, err = s.auth.UpdateAdminWithResult(username, req.Password)
+		if err != nil {
+			jsonOK(c, err)
+			return
+		}
+		if changed {
+			s.clearManagementCookie(c)
+		}
 	}
 	if req.LogRetentionDays != nil {
 		if err := s.auth.SetLogRetention(*req.LogRetentionDays); err != nil {
@@ -294,7 +380,7 @@ func (s *Server) updateAdminUser(c *gin.Context) {
 		jsonOK(c, err)
 		return
 	}
-	c.JSON(200, gin.H{"ok": true, "username": a.Username, "log_retention_days": a.LogRetentionDays})
+	c.JSON(200, gin.H{"ok": true, "username": a.Username, "log_retention_days": a.LogRetentionDays, "reauth_required": changed})
 }
 func (s *Server) sources(c *gin.Context) {
 	v, err := s.sourceSvc.List()
@@ -358,16 +444,36 @@ func (s *Server) deleteSource(c *gin.Context) {
 	jsonOK(c, s.sourceSvc.Delete(id))
 }
 func (s *Server) syncSource(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	jsonOK(c, s.sourceSvc.Sync(id))
-}
-func (s *Server) syncAllSources(c *gin.Context) {
-	res, ok := s.runSourceSyncAll("manual")
-	if !ok {
-		c.JSON(409, gin.H{"ok": false, "error": "source sync already running", "results": res})
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(400, gin.H{"ok": false, "error": "invalid source ID"})
 		return
 	}
-	c.JSON(200, gin.H{"ok": true, "results": res})
+	task, err := s.runSyncTask(c.Request.Context(), []int64{id}, "legacy")
+	if err != nil {
+		taskJSONError(c, err)
+		return
+	}
+	c.Header("X-Subgo-Task-ID", task.ID)
+	if task.Status != jobs.Completed {
+		c.JSON(400, gin.H{"ok": false, "error": taskFailureMessage(task), "task": task})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "task": task})
+}
+func (s *Server) syncAllSources(c *gin.Context) {
+	task, err := s.runSyncTask(c.Request.Context(), nil, "legacy")
+	if err != nil {
+		var conflict *jobs.ConflictError
+		if errors.As(err, &conflict) {
+			c.JSON(409, gin.H{"ok": false, "error": safeTaskError(err), "results": map[int64]string{-1: safeTaskError(err)}, "task_id": conflict.TaskID})
+			return
+		}
+		taskJSONError(c, err)
+		return
+	}
+	c.Header("X-Subgo-Task-ID", task.ID)
+	c.JSON(200, gin.H{"ok": true, "results": legacySyncResults(task), "task": task})
 }
 func (s *Server) kernelStatus(c *gin.Context) { c.JSON(200, s.conn.KernelStatus()) }
 func (s *Server) connectivityList(c *gin.Context) {
@@ -375,9 +481,23 @@ func (s *Server) connectivityList(c *gin.Context) {
 	jsonResultKey(c, "connectivity", v, err)
 }
 func (s *Server) connectivityCheck(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	v, err := s.conn.Check(limit)
-	jsonResultKey(c, "results", v, err)
+	scope, err := decodeConnectivityScope(c, true)
+	if err != nil {
+		taskJSONError(c, err)
+		return
+	}
+	task, err := s.taskSvc.SubmitConnectivity(c.Request.Context(), scope, "legacy")
+	if err != nil {
+		taskJSONError(c, err)
+		return
+	}
+	task, err = s.waitLegacyTask(c.Request.Context(), task.ID)
+	if err != nil {
+		taskJSONError(c, err)
+		return
+	}
+	c.Header("X-Subgo-Task-ID", task.ID)
+	c.JSON(200, gin.H{"ok": true, "results": legacyConnectivityResults(task), "task": task})
 }
 
 // ---- 日志中心 ------------------------------------------------------------
@@ -615,15 +735,39 @@ func lastPathID(path string) string {
 }
 
 func (s *Server) viewHome(c *gin.Context) {
-	sources, _ := s.sourceSvc.List()
-	nodes, _ := s.nodes.List(0)
-	subs, _ := s.subs.List(s.publicBase(c))
+	sources, err := s.sourceSvc.ListContext(c.Request.Context())
+	if err != nil {
+		c.JSON(503, gin.H{"ok": false, "error": "source data unavailable"})
+		return
+	}
+	nodes, err := s.nodes.ListContext(c.Request.Context(), 0)
+	if err != nil {
+		c.JSON(503, gin.H{"ok": false, "error": "node data unavailable"})
+		return
+	}
+	subs, err := s.subs.List(s.publicBase(c))
+	if err != nil {
+		c.JSON(503, gin.H{"ok": false, "error": "subscription data unavailable"})
+		return
+	}
 	c.JSON(200, gin.H{"ok": true, "stats": gin.H{"sources": len(sources), "nodes": len(nodes), "subscriptions": len(subs)}})
 }
 func (s *Server) viewBootstrap(c *gin.Context) {
-	sources, _ := s.sourceSvc.List()
-	nodes, _ := s.nodes.List(0)
-	subs, _ := s.subs.List(s.publicBase(c))
+	sources, err := s.sourceSvc.ListContext(c.Request.Context())
+	if err != nil {
+		c.JSON(503, gin.H{"ok": false, "error": "source data unavailable"})
+		return
+	}
+	nodes, err := s.nodes.ListContext(c.Request.Context(), 0)
+	if err != nil {
+		c.JSON(503, gin.H{"ok": false, "error": "node data unavailable"})
+		return
+	}
+	subs, err := s.subs.List(s.publicBase(c))
+	if err != nil {
+		c.JSON(503, gin.H{"ok": false, "error": "subscription data unavailable"})
+		return
+	}
 	base := strings.TrimRight(s.publicBase(c), "/")
 	subEnriched := make([]gin.H, len(subs))
 	for i, sub := range subs {
@@ -662,7 +806,9 @@ func (s *Server) suiRealityQuick(c *gin.Context) {
 	v, err := s.sourceSvc.RealityQuick(id, req.Remark, req.Port)
 	if err == nil {
 		s.auditCtx(c, "reality_quick", "source", strconv.FormatInt(id, 10), req.Remark)
-		_ = s.sourceSvc.Sync(id)
+		if task, _ := s.runSyncTask(c.Request.Context(), []int64{id}, "upstream_change"); task.ID != "" {
+			c.Header("X-Subgo-Task-ID", task.ID)
+		}
 	}
 	jsonResultKey(c, "obj", v, err)
 }
@@ -676,7 +822,9 @@ func (s *Server) suiInboundRename(c *gin.Context) {
 	err := s.sourceSvc.RenameInbound(sid, iid, req.Remark)
 	if err == nil {
 		s.auditCtx(c, "inbound_rename", "inbound", strconv.FormatInt(iid, 10), req.Remark)
-		_ = s.sourceSvc.Sync(sid)
+		if task, _ := s.runSyncTask(c.Request.Context(), []int64{sid}, "upstream_change"); task.ID != "" {
+			c.Header("X-Subgo-Task-ID", task.ID)
+		}
 	}
 	jsonOK(c, err)
 }
@@ -686,7 +834,9 @@ func (s *Server) suiInboundDelete(c *gin.Context) {
 	err := s.sourceSvc.DeleteInbound(sid, iid)
 	if err == nil {
 		s.auditCtx(c, "inbound_delete", "inbound", strconv.FormatInt(iid, 10), "source="+strconv.FormatInt(sid, 10))
-		_ = s.sourceSvc.Sync(sid)
+		if task, _ := s.runSyncTask(c.Request.Context(), []int64{sid}, "upstream_change"); task.ID != "" {
+			c.Header("X-Subgo-Task-ID", task.ID)
+		}
 	}
 	jsonOK(c, err)
 }
@@ -764,8 +914,18 @@ func (s *Server) bridgePushSource(c *gin.Context) {
 		}
 		id = src.ID
 	}
-	go func(sid int64) { _ = s.sourceSvc.Sync(sid) }(id)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "source_id": id, "name": name})
+	task, err := s.taskSvc.SubmitSync(c.Request.Context(), []int64{id}, "bridge")
+	if err != nil {
+		var conflict *jobs.ConflictError
+		if errors.As(err, &conflict) {
+			task, err = s.taskSvc.Get(c.Request.Context(), conflict.TaskID)
+		}
+		if err != nil {
+			taskJSONError(c, err)
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "source_id": id, "name": name, "task": task})
 }
 
 func (s *Server) listNodes(c *gin.Context) {
@@ -786,10 +946,19 @@ func (s *Server) createLocalNode(c *gin.Context) {
 	jsonResultKey(c, "node", n, err)
 }
 func (s *Server) toggleNode(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var req struct{ Enabled bool }
-	_ = c.ShouldBindJSON(&req)
-	jsonOK(c, s.nodes.Toggle(id, req.Enabled))
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(400, gin.H{"ok": false, "error": "invalid node ID"})
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeTaskJSON(c, &req, false); err != nil || req.Enabled == nil {
+		c.JSON(400, gin.H{"ok": false, "error": "explicit enabled boolean required"})
+		return
+	}
+	jsonOK(c, s.nodes.ToggleContext(c.Request.Context(), id, *req.Enabled))
 }
 func (s *Server) renameNode(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -839,12 +1008,13 @@ func (s *Server) renameNode(c *gin.Context) {
 }
 
 func nodeInboundID(n models.Node) int64 {
-	if strings.HasPrefix(strings.ToUpper(n.DisplayNo), "S") {
-		parts := strings.SplitN(n.DisplayNo[1:], "-", 2)
-		if len(parts) == 2 {
-			if v, err := strconv.ParseInt(strings.TrimLeft(parts[1], "0"), 10, 64); err == nil && v > 0 {
-				return v
-			}
+	s := strings.ToUpper(n.DisplayNo)
+	s = strings.TrimPrefix(s, "NX-")
+	s = strings.TrimPrefix(s, "S")
+	parts := strings.Split(s, "-")
+	if len(parts) >= 2 {
+		if v, err := strconv.ParseInt(strings.TrimLeft(parts[len(parts)-1], "0"), 10, 64); err == nil && v > 0 {
+			return v
 		}
 	}
 	return n.ID
@@ -920,138 +1090,7 @@ func (s *Server) deleteSubscription(c *gin.Context) {
 }
 
 func (s *Server) panelProxy(c *gin.Context) {
-	if _, ok := s.currentUser(c); !ok {
-		c.String(401, "unauthorized")
-		return
-	}
-	sid, _ := strconv.ParseInt(c.Param("sourceId"), 10, 64)
-	src, err := s.sourceSvc.Get(sid)
-	if err != nil {
-		c.String(404, "source not found")
-		return
-	}
-	if src.Type == "local" {
-		c.String(400, "local source not supported")
-		return
-	}
-	base := strings.TrimRight(src.PanelURL, "/")
-	if strings.Contains(base, "/api/v1/sub/") {
-		if u, er := url.Parse(base); er == nil {
-			base = u.Scheme + "://" + u.Host
-		}
-	}
-	tail := c.Param("path")
-	target := base + tail
-	if c.Request.URL.RawQuery != "" {
-		target += "?" + c.Request.URL.RawQuery
-	}
-	if err := source.AssertURLSafe(target); err != nil {
-		c.String(403, err.Error())
-		return
-	}
-	method := c.Request.Method
-	if method == "TRACE" || method == "CONNECT" {
-		c.String(405, "method not allowed")
-		return
-	}
-	var body io.Reader
-	if method != "GET" && method != "HEAD" {
-		body = c.Request.Body
-	}
-	req, _ := http.NewRequest(method, target, body)
-	for _, h := range []string{"Accept", "Accept-Language", "Content-Type", "User-Agent"} {
-		if v := c.GetHeader(h); v != "" {
-			req.Header.Set(h, v)
-		}
-	}
-	if ck := filterProxyCookie(c.GetHeader("Cookie")); ck != "" {
-		req.Header.Set("Cookie", ck)
-	}
-	if src.PanelToken != "" {
-		req.Header.Set("X-Panel-Token", src.PanelToken)
-		req.Header.Set("Authorization", "Bearer "+src.PanelToken)
-	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		c.String(502, "panel proxy error: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	for k, vals := range resp.Header {
-		lk := strings.ToLower(k)
-		if lk == "content-length" || lk == "set-cookie" {
-			continue
-		}
-		for _, v := range vals {
-			c.Writer.Header().Add(k, v)
-		}
-	}
-	if loc := resp.Header.Get("Location"); loc != "" {
-		if u, er := url.Parse(loc); er == nil {
-			if !u.IsAbs() {
-				loc = "/panel-proxy/" + strconv.FormatInt(sid, 10) + loc
-			}
-		}
-		c.Header("Location", loc)
-	}
-	for _, sc := range resp.Header.Values("Set-Cookie") {
-		c.Writer.Header().Add("Set-Cookie", rewriteProxySetCookie(sc, sid))
-	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && method == "GET" && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-		bodyBytes = injectPanelProxyBase(bodyBytes, sid)
-		c.Header("Content-Length", strconv.Itoa(len(bodyBytes)))
-		c.Status(resp.StatusCode)
-		_, _ = c.Writer.Write(bodyBytes)
-		return
-	}
-	c.Status(resp.StatusCode)
-	_, _ = io.Copy(c.Writer, io.LimitReader(resp.Body, 16<<20))
-}
-
-func injectPanelProxyBase(body []byte, sid int64) []byte {
-	prefix := "/panel-proxy/" + strconv.FormatInt(sid, 10)
-	// SUI-Go and similar panels commonly use absolute root paths from their SPA
-	// code. When proxied under /panel-proxy/:sourceId, rewrite both API calls
-	// and hard redirects such as location.href='/login.html'; otherwise the
-	// browser escapes to subgo's own /login.html and gets a 404.
-	body = bytes.ReplaceAll(body, []byte("location.href='/login.html'"), []byte("location.href='"+prefix+"/login.html'"))
-	body = bytes.ReplaceAll(body, []byte(`location.href="/login.html"`), []byte(`location.href="`+prefix+`/login.html"`))
-	body = bytes.ReplaceAll(body, []byte("location.href='/'"), []byte("location.href='"+prefix+"/'"))
-	body = bytes.ReplaceAll(body, []byte(`location.href="/"`), []byte(`location.href="`+prefix+`/"`))
-	script := `<script>(function(){const P='` + prefix + `';function r(u){try{if(typeof u!=='string')return u;if(u.startsWith('/api/')||u.startsWith('/auth/')||u==='/login.html'||u==='/index.html'||u==='/')return P+u;return u}catch(e){return u}}const of=window.fetch;window.fetch=function(input,init){if(typeof input==='string')input=r(input);else if(input&&input.url){const nu=r(input.url);if(nu!==input.url)input=new Request(nu,input)}return of.call(this,input,init)};const oo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=r(u);return oo.apply(this,arguments)};document.addEventListener('click',function(e){const a=e.target&&e.target.closest&&e.target.closest('a[href^="/"]');if(a&&!a.href.includes('/panel-proxy/'))a.href=r(a.getAttribute('href'))},true);})();</script>`
-	if bytes.Contains(body, []byte(script)) {
-		return body
-	}
-	if i := bytes.Index(bytes.ToLower(body), []byte("</head>")); i >= 0 {
-		out := make([]byte, 0, len(body)+len(script))
-		out = append(out, body[:i]...)
-		out = append(out, script...)
-		out = append(out, body[i:]...)
-		return out
-	}
-	return append([]byte(script), body...)
-}
-func filterProxyCookie(raw string) string {
-	parts := strings.Split(raw, ";")
-	keep := []string{}
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" || strings.HasPrefix(p, "subgo_session=") {
-			continue
-		}
-		keep = append(keep, p)
-	}
-	return strings.Join(keep, "; ")
-}
-func rewriteProxySetCookie(raw string, sid int64) string {
-	parts := strings.Split(raw, ";")
-	if len(parts) == 0 {
-		return raw
-	}
-	out := []string{parts[0], "Path=/panel-proxy/" + strconv.FormatInt(sid, 10), "HttpOnly", "SameSite=Lax"}
-	return strings.Join(out, "; ")
+	s.serveIsolatedPanelProxy(c)
 }
 
 func (s *Server) clashTemplate() []byte {
@@ -1067,7 +1106,7 @@ func (s *Server) refreshClashTemplate() {
 	}
 	for {
 		func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err != nil {
@@ -1106,12 +1145,22 @@ func (s *Server) refreshClashTemplate() {
 			s.templateMu.Unlock()
 			log.Printf("[clash-template] refreshed (%d bytes, proxy-groups=%d rules=%d)", len(body), info.ProxyGroups, info.Rules)
 		}()
-		time.Sleep(5 * time.Minute)
+		timer := time.NewTimer(5 * time.Minute)
+		select {
+		case <-s.ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
 func (s *Server) subClash(c *gin.Context) {
-	out, err := s.subs.Clash(c.Param("token"), c.ClientIP(), c.GetHeader("User-Agent"), s.clashTemplate())
+	if !s.ensureFreshConnectivity(c) {
+		return
+	}
+	out, report, err := s.subs.ClashWithReport(c.Param("token"), c.ClientIP(), c.GetHeader("User-Agent"), s.clashTemplate())
+	setConversionHeaders(c, report)
 	if err != nil {
 		c.String(404, err.Error())
 		return
@@ -1121,6 +1170,9 @@ func (s *Server) subClash(c *gin.Context) {
 }
 
 func (s *Server) subPlain(c *gin.Context) {
+	if !s.ensureFreshConnectivity(c) {
+		return
+	}
 	out, err := s.subs.PlainLinks(c.Param("token"), c.ClientIP(), c.GetHeader("User-Agent"))
 	if err != nil {
 		status := 404
@@ -1145,11 +1197,7 @@ func (s *Server) requireAuth() gin.HandlerFunc {
 	}
 }
 func (s *Server) currentUser(c *gin.Context) (string, bool) {
-	ck, err := c.Cookie("subgo_session")
-	if err != nil {
-		return "", false
-	}
-	return s.auth.Verify(ck)
+	return s.currentManagementUser(c)
 }
 func (s *Server) publicBase(c *gin.Context) string {
 	if s.cfg.BaseURL != "" {
@@ -1222,6 +1270,7 @@ func (s *Server) home(c *gin.Context) {
 }
 
 func (s *Server) app(c *gin.Context) {
+	noStoreHeaders(c)
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	paths := []string{
 		filepath.Join("web", "index.html"),

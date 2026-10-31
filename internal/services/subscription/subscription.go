@@ -1,17 +1,30 @@
 package subscription
 
 import (
+	"net"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/Spittingjiu/subgo/internal/models"
-	"github.com/Spittingjiu/subgo/internal/subconv"
 )
+
+func isLocalTestIP(ipStr string) bool {
+	ipStr = strings.TrimSpace(ipStr)
+	if ipStr == "" || ipStr == "127.0.0.1" || ipStr == "::1" || ipStr == "localhost" || strings.HasPrefix(ipStr, "127.") {
+		return true
+	}
+	ip := net.ParseIP(ipStr)
+	if ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
 
 type Service struct{ db *sql.DB }
 
@@ -132,20 +145,19 @@ func (s *Service) links(token, clientIP, ua, routeType string) (string, error) {
 		return "", err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = s.db.Exec(`UPDATE subscriptions SET access_count=access_count+1,last_accessed_at=? WHERE id=?`, now, sub.ID)
-	_, _ = s.db.Exec(`INSERT INTO subscription_logs(token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at) VALUES(?,?,?,?,?,?,?)`, token, sub.ID, sub.Name, routeType, clientIP, ua, now)
+	if !isLocalTestIP(clientIP) {
+		_, _ = s.db.Exec(`UPDATE subscriptions SET access_count=access_count+1,last_accessed_at=? WHERE id=?`, now, sub.ID)
+		_, _ = s.db.Exec(`INSERT INTO subscription_logs(token,subscription_id,subscription_name,route_type,client_ip,user_agent,status,error_message,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, token, sub.ID, sub.Name, routeType, clientIP, ua, "success", "", now)
+	}
 	return strings.Join(links, "\n") + "\n", nil
 }
 
 func (s *Service) Clash(token, clientIP, ua string, clashTemplate []byte) (string, error) {
-	plain, err := s.links(token, clientIP, ua, "clash")
-	if err != nil {
-		return "", err
+	out, report, err := s.ClashWithReport(token, clientIP, ua, clashTemplate)
+	if report.SkippedCount > 0 || !report.Valid || len(report.Warnings) > 0 {
+		log.Printf("[subconv] input=%d converted=%d skipped=%d valid=%t errors=%d warnings=%d", report.InputCount, report.ConvertedCount, report.SkippedCount, report.Valid, len(report.Errors), len(report.Warnings))
 	}
-	if len(clashTemplate) > 0 {
-		return subconv.ClashYAMLFromTemplate(subconv.ParseSubscriptionText(plain), clashTemplate)
-	}
-	return subconv.ClashYAML(subconv.ParseSubscriptionText(plain))
+	return out, err
 }
 
 func (s *Service) getByToken(token string) (models.Subscription, error) {

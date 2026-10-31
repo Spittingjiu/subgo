@@ -45,6 +45,8 @@ type SubscriptionRow struct {
 	RouteType        string `json:"route_type"`
 	ClientIP         string `json:"client_ip"`
 	UserAgent        string `json:"user_agent"`
+	Status           string `json:"status"`
+	ErrorMessage     string `json:"error_message"`
 	Device           string `json:"device"`
 	Icon             string `json:"icon"`
 	CreatedAt        string `json:"created_at"`
@@ -397,7 +399,7 @@ func (s *Service) System(f Filter) ([]SystemRow, int, error) {
 
 func (s *Service) Subscriptions(f Filter) ([]SubscriptionRow, int, error) {
 	f = f.normalized(100)
-	where := []string{"1=1"}
+	where := []string{"1=1", "(client_ip NOT IN ('127.0.0.1', '::1', 'localhost') AND client_ip NOT LIKE '127.%')"}
 	args := []any{}
 	if f.SubscriptionID > 0 {
 		where = append(where, "subscription_id=?")
@@ -413,7 +415,7 @@ func (s *Service) Subscriptions(f Filter) ([]SubscriptionRow, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query(`SELECT id,token,subscription_id,subscription_name,route_type,client_ip,user_agent,created_at FROM subscription_logs WHERE `+clause+` ORDER BY id DESC LIMIT ? OFFSET ?`, withPage(args, f)...)
+	rows, err := s.db.Query(`SELECT id,token,subscription_id,subscription_name,route_type,client_ip,user_agent,COALESCE(status,'success'),COALESCE(error_message,''),created_at FROM subscription_logs WHERE `+clause+` ORDER BY id DESC LIMIT ? OFFSET ?`, withPage(args, f)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -421,7 +423,7 @@ func (s *Service) Subscriptions(f Filter) ([]SubscriptionRow, int, error) {
 	out := []SubscriptionRow{}
 	for rows.Next() {
 		var r SubscriptionRow
-		if err := rows.Scan(&r.ID, &r.Token, &r.SubscriptionID, &r.SubscriptionName, &r.RouteType, &r.ClientIP, &r.UserAgent, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Token, &r.SubscriptionID, &r.SubscriptionName, &r.RouteType, &r.ClientIP, &r.UserAgent, &r.Status, &r.ErrorMessage, &r.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		r.Device = DeviceLabel(r.UserAgent)
@@ -463,14 +465,14 @@ func (s *Service) Audits(f Filter) ([]AuditRow, int, error) {
 
 func (s *Service) Stats() (Stats, error) {
 	var st Stats
-	for table, dst := range map[string]*int{
-		"system_logs":       &st.System,
-		"subscription_logs": &st.Subscription,
-		"audit_logs":        &st.Audit,
-	} {
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(dst); err != nil {
-			return st, err
-		}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM system_logs`).Scan(&st.System); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM subscription_logs WHERE client_ip NOT IN ('127.0.0.1', '::1', 'localhost') AND client_ip NOT LIKE '127.%'`).Scan(&st.Subscription); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM audit_logs`).Scan(&st.Audit); err != nil {
+		return st, err
 	}
 	return st, nil
 }
@@ -572,9 +574,13 @@ func (s *Service) Export(kind string, f Filter, w io.Writer) error {
 		}
 		out := make([][]string, 0, len(rows))
 		for _, r := range rows {
-			out = append(out, []string{r.CreatedAt, r.SubscriptionName, r.Token, r.RouteType, r.Device, r.ClientIP, r.UserAgent})
+			st := "成功"
+			if r.Status == "fail" {
+				st = "失败"
+			}
+			out = append(out, []string{r.CreatedAt, r.SubscriptionName, st, r.ErrorMessage, r.Token, r.RouteType, r.Device, r.ClientIP, r.UserAgent})
 		}
-		return write([]string{"时间", "订阅", "Token", "类型", "设备", "IP", "User-Agent"}, out)
+		return write([]string{"时间", "订阅", "下发状态", "失败原因", "Token", "类型", "设备", "IP", "User-Agent"}, out)
 	case KindAudit:
 		rows, _, err := s.Audits(f)
 		if err != nil {
